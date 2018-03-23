@@ -36,7 +36,7 @@ const string opcode_str[] = {"ADD", "SUB", "XOR", "OR", "AND", "MULT", "DIV", "B
 
 class sim_ooo{
 
-   //TODO: Data structure for ROB
+   //Data structure for ROB
    struct robT{
       bool       busy;
       bool       ready;
@@ -45,21 +45,21 @@ class sim_ooo{
       int        dst; //FIXME: type of destination?
       unsigned   value;
 
-      robT(){
-         emptyRob();
-      }
+      //robT(){
+      //   emptyRob();
+      //}
 
-      void emptyRob(){
-         busy    = false;
-         ready   = false;
-         pc      = UNDEFINED;
-         state   = UNDEFINED;
-         dst     = UNDEFINED;
-         value   = UNDEFINED;
-      }
+      //void emptyRob(){
+      //   busy    = false;
+      //   ready   = false;
+      //   pc      = UNDEFINED;
+      //   state   = UNDEFINED;
+      //   dst     = UNDEFINED;
+      //   value   = UNDEFINED;
+      //}
    }
 
-   //TODO: Data structure for Reservation Station
+   //Data structure for Reservation Station
    struct resStationT{
       bool       busy;
       unsigned   pcRs;
@@ -85,11 +85,6 @@ class sim_ooo{
          addr  = UNDEFINED;
       }
 
-   }
-
-   //TODO: Data structure for instruction status
-   struct instStatus{
-      unsigned pcS;
    }
 
    //-------------------------------------------------------------------------------//
@@ -199,6 +194,8 @@ class sim_ooo{
          uint32_t       pipeReg[NUM_STAGES][NUM_SP_REGISTERS];
 
          instructT      instrArray[NUM_STAGES];
+         instructT      *issueQ;
+         int            stateCycle[NUM_STAGES];
 
          unsigned       data_memory_size;
          instructPT     *instMemory;
@@ -206,6 +203,12 @@ class sim_ooo{
          unsigned       memLatency;
          unsigned       memFlag;
          unsigned       baseAddress;
+         unsigned       pc;
+         
+         resStationT    *resInt;
+         resStationT    *resAdd;
+         resStationT    *resMul;
+         resStationT    *resLoad;
 
          unsigned       robSize;
          unsigned       intResSize;
@@ -216,7 +219,7 @@ class sim_ooo{
 
    //----------------------------------------------------------------------------//
 
-      Fifo <int> *rob;
+      Fifo <robT> *rob;
       public:
 
       /* Instantiates the simulator

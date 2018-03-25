@@ -45,29 +45,26 @@ sim_ooo::sim_ooo(unsigned mem_size,
                 unsigned num_load_res_stations,
                 unsigned max_issue){
 
-	data_memory_size = mem_size;
-   robSize          = rob_size;
-   intResSize       = num_int_res_stations;
-   addResSize       = num_add_res_stations;
-   mulResSize       = num_mul_res_stations;
-   loadBufferSize   = num_load_res_stations;
-   issueWidth       = max_issue;
+	data_memory_size       = mem_size;
+   robSize                = rob_size;
+   issueWidth             = max_issue;
+
+   resStSize              = new int[RS_TOTAL];
+   resStSize[INTEGER_RS]  = num_int_res_stations;
+   resStSize[ADD_RS]      = num_add_res_stations;
+   resStSize[MULT_RS]     = num_mul_res_stations;
+   resStSize[LOAD_B]      = num_load_res_stations;
 
    //Allocating issue queue, ROB, reservation stations
-	data_memory      = new unsigned char[data_memory_size];
-   issueQ           = new instructT[max_issue];
-   rob              = new Fifo<int>( rob_size );
-   resInt           = new resStationT[num_int_res_stations];
-   resAdd           = new resStationT[num_add_res_stations];
-   resMul           = new resStationT[num_mul_res_stations];
-   resLoad          = new resStationT[num_load_res_stations];
-   
-   //for( int i = 0; i < rob_size; i++ ){
-   //   rob->push( i );
-   //}
-   //for( int i = 0; i < rob_size; i++ ){
-   //   bool underflow;
-   //}
+	data_memory            = new unsigned char[data_memory_size];
+   issueQ                 = new instructT[max_issue];
+   rob                    = new Fifo<robT>( rob_size );
+
+   resStation             = new resStationT*[RS_TOTAL];
+   resStation[INTEGER_RS] = new resStationT[num_int_res_stations];
+   resStation[ADD_RS]     = new resStationT[num_add_res_stations];
+   resStation[MULT_RS]    = new resStationT[num_mul_res_stations];
+   resStation[LOAD_B]     = new resStationT[num_load_res_stations];
 }
 	
 sim_ooo::~sim_ooo(){
@@ -79,12 +76,11 @@ void sim_ooo::init_exec_unit(exe_unit_t exec_unit, unsigned latency, unsigned in
 }
 
 void sim_ooo::load_program(const char *filename, unsigned base_address){
-   instMemSize            = parse(string(filename));
+   instMemSize            = parse(string(filename), base_address);
    this->baseAddress      = base_address;
-   this->pc               = base_address;
 }
 
-instructT sim_pipe_fp::fetchInstruction ( unsigned pc ) {
+instructT sim_ooo::fetchInstruction ( unsigned pc ) {
    //TODO: check how to fetch N instructions at once
    int      index     = (pc - this->baseAddress)/4;
    ASSERT((index >= 0) && (index < instMemSize), "out of bound access of instruction memory %d", index);
@@ -102,71 +98,41 @@ instructT sim_pipe_fp::fetchInstruction ( unsigned pc ) {
 //pass the instructions to reservation stations
 //update tag of general purpose registers
 
-bool sim_pipe_fp::issue( ) {
-
-   for (int i = 0; i < issueWidth; i++){
+bool sim_ooo::issue( ) {
+   for (int i = 0; i < issueWidth && rob->isFull(); i++){
       instructT instruct   = fetchInstruction ( pc );
       exe_unit_t unit      = opcodeToExUnit(instruct.opcode);
-      bool full            = false;
-      int  stNum           = 0;
 
-      switch (unit){
-         case INTEGER: {
-                          for (int i = 0; i < num_int_res_stations; i++) {
-                             if(!(resInt[i].busy)){
-                                full  = false;
-                                stNum = i;
-                                break;
-                             }
-                          }
-                       }
-                       break;
-         case ADDER: {
-                        for (int i = 0; i < num_add_res_stations; i++) {
-                           if(!resAdd[i].busy){
-                              full  = false;
-                              stNum = i;
-                              break;
-                           }
-                        }
-                     }
-                     break;
-         case DIVIDER:
-         case MULTIPLIER: {
-                             for (int i = 0; i < num_mul_res_stations; i++) {
-                                if(!resMul[i].busy){
-                                   full  = false;
-                                   stNum = i;
-                                   break;
-                                }
-                             }
-                          }
-                          break;
-         case MEMORY: {
-                         for (int i = 0; i < num_load_res_stations; i++) {
-                            if(resLoad[i].busy){
-                               full  = false;
-                               stNum = i;
-                               break;
-                            }
-                         }
-                      }
-                      break;
-         case default: full = false;
-                       break;
+      resStationT* resUnit = resStation[unit];
+
+      for (int i = 0; i < resStSize[unit]; i++) {
+         if(!resUnit[i].busy){
+            robT robEntry      = robT(&instruct);
+            uint32_t robIndex  = rob->push(robEntry);
+            resUnit[i]         = resStationT(robEntry.dInstP);
+            resUnit[i].busy    = true;
+            resUnit[i].vj      = (instruct.src1Valid) ? regRead(instruct.src1, instruct.src1F) : UNDEFINED;
+            resUnit[i].vk      = (instruct.src2Valid) ? regRead(instruct.src2, instruct.src2F) : UNDEFINED;
+            resUnit[i].qj      = (instruct.src1Valid) ? regTag(instruct.src1, instruct.src1F) : UNDEFINED;
+            resUnit[i].qk      = (instruct.src2Valid) ? regTag(instruct.src2, instruct.src2F) : UNDEFINED;
+            resUnit[i].tagD    = robIndex;
+            if( unit == MEMORY )
+               resUnit[i].addr = instruct.imm;
+            break;
+         }
       }
-      }
+      if( instruct.is_branch )
+         break;
    }
 }
 
-
 //-------------------------------issue stage end-------------------------------------------------------------//
 
-bool sim_pipe_fp::regBusy(uint32_t regNo, bool isF) {
+bool sim_ooo::regBusy(uint32_t regNo, bool isF) {
    return isF ? fpFile[regNo].busy : gprFile[regNo].busy;
 }
 
-bool sim_pipe_fp::intBranch(){
+bool sim_ooo::intBranch(){
    for(int i = 0; i < execFp[INTEGER].numLanes; i++) {
       if( execFp[INTEGER].lanes[i].instruct.is_branch ) {
          return true;
@@ -175,7 +141,7 @@ bool sim_pipe_fp::intBranch(){
    return false;
 }
 
-exe_unit_t sim_pipe_fp::opcodeToExUnit(opcode_t opcode){
+exe_unit_t sim_ooo::opcodeToExUnit(opcode_t opcode){
    exe_unit_t unit;
    switch( opcode ){
       case ADD ... AND:
@@ -213,16 +179,16 @@ exe_unit_t sim_pipe_fp::opcodeToExUnit(opcode_t opcode){
    return unit;
 }
 
-int sim_pipe_fp::exLatency(opcode_t opcode) {
+int sim_ooo::exLatency(opcode_t opcode) {
    return execFp[opcodeToExUnit(opcode)].latency;
 }
 
-uint32_t sim_pipe_fp::agen ( instructT instruct) {
+uint32_t sim_ooo::agen ( instructT instruct) {
    return (instruct.imm + regRead(instruct.src1, instruct.src1F));
 }
 
 //ALU function for floating point operations
-unsigned sim_pipe_fp::aluF (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode){
+unsigned sim_ooo::aluF (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode){
    float output;
    float value1 = value1F ? unsigned2float(_value1) : _value1;
    float value2 = value2F ? unsigned2float(_value2) : _value2; 
@@ -273,7 +239,7 @@ unsigned sim_pipe_fp::aluF (unsigned _value1, unsigned _value2, bool value1F, bo
 }
 
 //function to perform ALU operations
-unsigned sim_pipe_fp::alu (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode){
+unsigned sim_ooo::alu (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode){
 
    if( value1F || value2F ) return aluF(_value1, _value2, value1F, value2F, opcode);
 
@@ -329,7 +295,7 @@ unsigned sim_pipe_fp::alu (unsigned _value1, unsigned _value2, bool value1F, boo
 //-------------------------------------------------------------------------------------------------------------------------------------------//
 
 //-------------------------------------------------------------execute stage-----------------------------------------------------------------//
-instructT sim_pipe_fp::execInst(int& count, uint32_t& b, uint32_t& npc){
+instructT sim_ooo::execInst(int& count, uint32_t& b, uint32_t& npc){
    instructT instruct;
    count = 0;
    for(int i = 0; i < EXEC_UNIT_TOTAL; i++){
@@ -352,7 +318,7 @@ instructT sim_pipe_fp::execInst(int& count, uint32_t& b, uint32_t& npc){
 }
 
 //To get the maximum ttl at a particular lane in the execution unit
-int sim_pipe_fp::getMaxTtl() {
+int sim_ooo::getMaxTtl() {
    int ttl = 0;
    for(int i = 0; i < EXEC_UNIT_TOTAL; i++){
       for(int j = 0; j < execFp[i].numLanes; j++){
@@ -362,14 +328,17 @@ int sim_pipe_fp::getMaxTtl() {
    return ttl;
 }
 
-void sim_pipe_fp::execute() {
+void sim_ooo::execute() {
 
-   instructT instruct                   = instrArray[EX]; 
+   for(int unit = 0; unit < RS_TOTAL; unit++) { 
+      for(int j = 0; j < execFp[unit].numLanes; j++){
+         if(execFp[unit].lanes[j].ttl == 0) {
+            resStation[] //TODO: start here!!
 
-   for(int i = 0; i < NUM_SP_REGISTERS; i++) {
-      this->pipeReg[MEM][i]     = UNDEFINED;
+         }
+      }
    }
-   this->pipeReg[MEM][COND]     = 0;
+
 
    for(int j = 0; j < execFp[opcodeToExUnit(instruct.opcode)].numLanes; j++){
       if(execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl == 0) {
@@ -497,6 +466,15 @@ void sim_ooo::reset(){
 }
 
 //------------------------------------SETTER/GETTER functions----------------------------------------------//
+
+unsigned sim_ooo::regRead(unsigned reg, bool isF){
+   if(regBusy(reg, isF)) return UNDEFINED;
+   return isF ? float2unsigned(fpFile[reg].value) : gprFile[reg].value;
+}
+unsigned sim_ooo::regTag(unsigned reg, bool isF){
+   if(regBusy(reg, isF)) return UNDEFINED;
+   return isF ? fpFile[reg].tag : gprFile[reg].tag;
+}
 
 
 int sim_ooo::get_int_register(unsigned reg){
@@ -751,11 +729,11 @@ template <class T> uint32_t Fifo<T>::getSize(){
 //--------------------------------- Fifo FUNCS END---------------------------------
 
 //----------------------------------------------PARSING OPERATION BEGINS---------------------------------//
-int sim_pipe_fp::indexToOffset( uint32_t line_index, uint32_t pc_index ){
+int sim_ooo::indexToOffset( uint32_t line_index, uint32_t pc_index ){
    return ((line_index - pc_index - 1) * 4);
 }
 
-int sim_pipe_fp::labelResolve(string label, 
+int sim_ooo::labelResolve(string label, 
                             map <string, int>& label_to_linenum,
                             map <string, vector <int>>& unresolved_label_index,
                             int line_num ){
@@ -770,7 +748,7 @@ int sim_pipe_fp::labelResolve(string label,
    return UNDEFINED;
 }
 
-void sim_pipe_fp::getReg( istringstream& buff_iss, uint32_t& reg, bool& regF, bool with_brackets ){
+void sim_ooo::getReg( istringstream& buff_iss, uint32_t& reg, bool& regF, bool with_brackets ){
    string reg_i_or_f, open_bracket, closed_bracket;
 
    if( with_brackets )
@@ -808,7 +786,7 @@ void sim_pipe_fp::getReg( istringstream& buff_iss, uint32_t& reg, bool& regF, bo
  *
  * NOTES       : -NA-
  */
-int sim_pipe_fp::parse( const string filename ){
+int sim_ooo::parse( const string filename, unsigned base_address ){
    int line_num = 0;
    string buff;
 
@@ -830,6 +808,7 @@ int sim_pipe_fp::parse( const string filename ){
    while( getline( asm_h, buff ) ) {
       instMemory               = (instructPT*) realloc(instMemory, (line_num + 1)*sizeof(instructPT));
       instructPT instructP     = new instructT;
+      instructP->pc            = (line_num * 4) + base_address;
 
       instMemory[line_num]     = instructP;
 

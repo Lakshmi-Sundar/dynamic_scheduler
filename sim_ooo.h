@@ -25,9 +25,9 @@ template <class T> class Fifo;
 
 typedef enum {LW, SW, ADD, ADDI, SUB, SUBI, XOR, XORI, OR, ORI, AND, ANDI, MULT, DIV, BEQZ, BNEZ, BLTZ, BGTZ, BLEZ, BGEZ, JUMP, EOP, LWS, SWS, ADDS, SUBS, MULTS, DIVS} opcode_t;
 
-typedef enum {INTEGER_RS, ADD_RS, MULT_RS, LOAD_B} res_station_t;
+typedef enum {INTEGER_RS, ADD_RS, MULT_RS, LOAD_B, RS_TOTAL} res_station_t;
 
-typedef enum {INTEGER, ADDER, MULTIPLIER, DIVIDER, MEMORY} exe_unit_t;
+typedef enum {INTEGER, ADDER, MULTIPLIER, DIVIDER, MEMORY, EX_TOTAL} exe_unit_t;
 
 typedef enum{ISSUE, EXECUTE, WRITE_RESULT, COMMIT} stage_t;
 
@@ -36,61 +36,65 @@ const string opcode_str[] = {"ADD", "SUB", "XOR", "OR", "AND", "MULT", "DIV", "B
 
 class sim_ooo{
 
+   typedef struct dynInstructT* dynInstructPT;
+   typedef struct instructT* instructPT;
+
    //Data structure for ROB
    struct robT{
-      bool       busy;
-      bool       ready;
-      unsigned   pc;
-      stage_t    state;
-      int        dst; //FIXME: type of destination?
-      unsigned   value;
+      dynInstructPT   dInstP;
+      bool            ready;
 
-      //robT(){
-      //   emptyRob();
-      //}
-
-      //void emptyRob(){
-      //   busy    = false;
-      //   ready   = false;
-      //   pc      = UNDEFINED;
-      //   state   = UNDEFINED;
-      //   dst     = UNDEFINED;
-      //   value   = UNDEFINED;
-      //}
+      robT(instructPT instructP){
+         dInstP  = new dynInstructT(instructP);
+         ready   = false;
+      }
    }
 
    //Data structure for Reservation Station
    struct resStationT{
-      bool       busy;
-      unsigned   pcRs;
-      unsigned   vj;
-      unsigned   vk;
-      int        qj;
-      int        qk;
-      int        tagD;
-      int        addr;
+      dynInstructPT   dInstP;
+      bool            busy;
+      unsigned        pcRs;
+      unsigned        vj;
+      unsigned        vk;
+      int             qj;
+      int             qk;
+      int             tagD;
+      int             addr;
 
-      resStationT(){
-         emptyRs();
-      }
-
-      void emptyRs(){
-         busy  = false;
-         pcRs  = UNDEFINED;
-         vj    = UNDEFINED;
-         vk    = UNDEFINED;
-         qj    = UNDEFINED;
-         qk    = UNDEFINED; 
-         tagD  = UNDEFINED; 
-         addr  = UNDEFINED;
+      resStationT(dynInstructPT dynInstP){
+         dInstP     = dynInstP;
+         busy       = false;
+         vj         = UNDEFINED;
+         vk         = UNDEFINED;
+         qj         = UNDEFINED;
+         qk         = UNDEFINED; 
+         tagD       = UNDEFINED; 
+         addr       = UNDEFINED;
       }
 
    }
 
    //-------------------------------------------------------------------------------//
-   typedef struct instructT* instructPT;
+   struct dynInstructT : public instructT{
+      int                t_issue;
+      int                t_execute;
+      int                t_wr;
+      int                t_commit;
+      stage_t            state;
+
+      dynInstructT( instructPT input ){
+         t_issue          = UNDEFINED;
+         t_execute        = UNDEFINED;
+         t_wr             = UNDEFINED;
+         t_commit         = UNDEFINED;
+         state            = ISSUE;
+         instructT(input);
+      }
+   };
 
    struct instructT{
+      unsigned           pc;
       opcode_t           opcode;
       uint32_t           dst;
       uint32_t           src1;
@@ -107,6 +111,23 @@ class sim_ooo{
 
       instructT(){
          nop();
+      }
+
+      instructT( instructPT input ){
+         pc         = input->pc;
+         opcode     = input->opcode; 
+         dst        = input->dst; 
+         src1       = input->src1; 
+         src2       = input->src2; 
+         imm        = input->imm; 
+         dstValid   = input->dstValid; 
+         src1Valid  = input->src1Valid;
+         src2Valid  = input->src2Valid;
+         is_stall   = input->is_stall; 
+         is_branch  = input->is_branch;
+         dstF       = input->dstF;
+         src1F      = input->src1F;    
+         src2F      = input->src2F;    
       }
 
       void print(){
@@ -135,178 +156,163 @@ class sim_ooo{
       }
    };
 
-   class sim_pipe_fp{
+   struct gprFileT{
+      int            value;
+      int            busy;
+      int            tag;
+   };
 
-      public:
-         struct gprFileT{
-            int            value;
-            int            busy;
-         };
+   struct fpFileT{
+      float          value;
+      int            busy;
+      int            tag;
+   };
 
-         struct fpFileT{
-            float          value;
-            int            busy;
-         };
+   struct execLaneT{
+      instructT      instruct;
+      int            ttl;
+      unsigned       b;
+      unsigned       exNpc;
 
-         struct execLaneT{
-            instructT      instruct;
-            int            ttl;
-            unsigned       b;
-            unsigned       exNpc;
+      execLaneT(){
+         ttl            = 0;
+      }
 
-            execLaneT(){
-               ttl            = 0;
-            }
+   };
 
-         };
+   struct execUnitT{
+      execLaneT      *lanes;
+      int            numLanes;
+      int            latency;
 
-         struct execUnitT{
-            execLaneT      *lanes;
-            int            numLanes;
-            int            latency;
+      execUnitT(){
+         lanes          = NULL;
+         numLanes       = 0;
+         latency        = 0;
+      }
 
-            execUnitT(){
-               lanes          = NULL;
-               numLanes       = 0;
-               latency        = 0;
-            }
-
-            void init(int numLanes, int latency){
-               ASSERT( latency > 0, "Impractical latency found (=%d)", latency );
-               ASSERT( numLanes > 0, "Unsupported number of lanes (=%d)", numLanes );
-               this->numLanes += numLanes;
-               this->latency   = latency;
-               lanes           = (execLaneT*)realloc(lanes, this->numLanes * sizeof(execLaneT));
-            }
-         };
+      void init(int numLanes, int latency){
+         ASSERT( latency > 0, "Impractical latency found (=%d)", latency );
+         ASSERT( numLanes > 0, "Unsupported number of lanes (=%d)", numLanes );
+         this->numLanes += numLanes;
+         this->latency   = latency;
+         lanes           = (execLaneT*)realloc(lanes, this->numLanes * sizeof(execLaneT));
+      }
+   };
 
 
-         int            cycleCount;
-         int            instCount;
-         int            latCount;
-         int            numStalls;
-         bool           latency;
-         int            instMemSize;
+   int            cycleCount;
 
-         gprFileT       gprFile[NUM_GP_REGISTERS];
-         fpFileT        fpFile[NUM_FP_REGISTERS];
-         execUnitT      execFp[EXEC_UNIT_TOTAL];
-         uint32_t       pipeReg[NUM_STAGES][NUM_SP_REGISTERS];
+   instructPT     *instMemory;
+   int            instCount;
 
-         instructT      instrArray[NUM_STAGES];
-         instructT      *issueQ;
-         int            stateCycle[NUM_STAGES];
+   gprFileT       gprFile[NUM_GP_REGISTERS];
+   fpFileT        fpFile[NUM_FP_REGISTERS];
+   execUnitT      execFp[EXEC_UNIT_TOTAL];
 
-         unsigned       data_memory_size;
-         instructPT     *instMemory;
-         unsigned       dataMemSize;
-         unsigned       memLatency;
-         unsigned       memFlag;
-         unsigned       baseAddress;
-         unsigned       pc;
-         
-         resStationT    *resInt;
-         resStationT    *resAdd;
-         resStationT    *resMul;
-         resStationT    *resLoad;
+   unsigned       data_memory_size;
+   unsigned       dataMemSize;
 
-         unsigned       robSize;
-         unsigned       intResSize;
-         unsigned       addResSize;
-         unsigned       mulResSize;
-         unsigned       loadBufferSize;
-         unsigned       issueWidth;
+   unsigned       memLatency;
+   unsigned       memFlag;
+   unsigned       baseAddress;
+
+   resStationT    *resStation[];
+   unsigned       resStSize[];
+
+   unsigned       robSize;
+   unsigned       issueWidth;
 
    //----------------------------------------------------------------------------//
 
-      Fifo <robT> *rob;
-      public:
+   Fifo <robT> *rob;
+   public:
 
-      /* Instantiates the simulator
-Note: registers must be initialized to UNDEFINED value, and data memory to all 0xFF values
-*/
-      sim_ooo(unsigned mem_size, 		// size of data memory (in byte)
-            unsigned rob_size, 		// number of ROB entries
-            unsigned num_int_res_stations,	// number of integer reservation stations 
-            unsigned num_add_res_stations,	// number of ADD reservation stations
-            unsigned num_mul_res_stations, 	// number of MULT/DIV reservation stations
-            unsigned num_load_buffers,	// number of LOAD buffers
-            unsigned issue_width=1		// issue width
-            );	
+   /* Instantiates the simulator
+      Note: registers must be initialized to UNDEFINED value, and data memory to all 0xFF values
+   */
+   sim_ooo(unsigned mem_size, 		// size of data memory (in byte)
+         unsigned rob_size, 		// number of ROB entries
+         unsigned num_int_res_stations,	// number of integer reservation stations 
+         unsigned num_add_res_stations,	// number of ADD reservation stations
+         unsigned num_mul_res_stations, 	// number of MULT/DIV reservation stations
+         unsigned num_load_buffers,	// number of LOAD buffers
+         unsigned issue_width=1		// issue width
+         );	
 
-      //de-allocates the simulator
-      ~sim_ooo();
+   //de-allocates the simulator
+   ~sim_ooo();
 
-      // adds one or more execution units of a given type to the processor
-      // - exec_unit: type of execution unit to be added
-      // - latency: latency of the execution unit (in clock cycles)
-      // - instances: number of execution units of this type to be added
-      void init_exec_unit(exe_unit_t exec_unit, unsigned latency, unsigned instances=1);
+   // adds one or more execution units of a given type to the processor
+   // - exec_unit: type of execution unit to be added
+   // - latency: latency of the execution unit (in clock cycles)
+   // - instances: number of execution units of this type to be added
+   void init_exec_unit(exe_unit_t exec_unit, unsigned latency, unsigned instances=1);
 
-      //loads the assembly program in file "filename" in instruction memory at the specified address
-      void load_program(const char *filename, unsigned base_address=0x0);
+   //loads the assembly program in file "filename" in instruction memory at the specified address
+   void load_program(const char *filename, unsigned base_address=0x0);
 
-      //runs the simulator for "cycles" clock cycles (run the program to completion if cycles=0) 
-      void run(unsigned cycles=0);
+   //runs the simulator for "cycles" clock cycles (run the program to completion if cycles=0) 
+   void run(unsigned cycles=0);
 
-      //resets the state of the simulator
-      /* Note: 
-         - registers should be reset to UNDEFINED value 
-         - data memory should be reset to all 0xFF values
-         - instruction window, reservation stations and rob should be cleaned
-         */
-      void reset();
+   //resets the state of the simulator
+   /* Note: 
+      - registers should be reset to UNDEFINED value 
+      - data memory should be reset to all 0xFF values
+      - instruction window, reservation stations and rob should be cleaned
+      */
+   void reset();
 
-      //returns value of the specified integer general purpose register
-      int get_int_register(unsigned reg);
+   //returns value of the specified integer general purpose register
+   int get_int_register(unsigned reg);
 
-      //set the value of the given integer general purpose register to "value"
-      void set_int_register(unsigned reg, int value);
+   //set the value of the given integer general purpose register to "value"
+   void set_int_register(unsigned reg, int value);
 
-      //returns value of the specified floating point general purpose register
-      float get_fp_register(unsigned reg);
+   //returns value of the specified floating point general purpose register
+   float get_fp_register(unsigned reg);
 
-      //set the value of the given floating point general purpose register to "value"
-      void set_fp_register(unsigned reg, float value);
+   //set the value of the given floating point general purpose register to "value"
+   void set_fp_register(unsigned reg, float value);
 
-      // returns the index of the ROB entry that will write this integer register (UNDEFINED if the value of the register is not pending
-      unsigned get_pending_int_register(unsigned reg);
+   // returns the index of the ROB entry that will write this integer register (UNDEFINED if the value of the register is not pending
+   unsigned get_pending_int_register(unsigned reg);
 
-      // returns the index of the ROB entry that will write this floating point register (UNDEFINED if the value of the register is not pending
-      unsigned get_pending_fp_register(unsigned reg);
+   // returns the index of the ROB entry that will write this floating point register (UNDEFINED if the value of the register is not pending
+   unsigned get_pending_fp_register(unsigned reg);
 
-      //returns the IPC
-      float get_IPC();
+   //returns the IPC
+   float get_IPC();
 
-      //returns the number of instructions fully executed
-      unsigned get_instructions_executed();
+   //returns the number of instructions fully executed
+   unsigned get_instructions_executed();
 
-      //returns the number of clock cycles 
-      unsigned get_clock_cycles();
+   //returns the number of clock cycles 
+   unsigned get_clock_cycles();
 
-      //prints the content of the data memory within the specified address range
-      void print_memory(unsigned start_address, unsigned end_address);
+   //prints the content of the data memory within the specified address range
+   void print_memory(unsigned start_address, unsigned end_address);
 
-      // writes an integer value to data memory at the specified address (use little-endian format: https://en.wikipedia.org/wiki/Endianness)
-      void write_memory(unsigned address, unsigned value);
+   // writes an integer value to data memory at the specified address (use little-endian format: https://en.wikipedia.org/wiki/Endianness)
+   void write_memory(unsigned address, unsigned value);
 
-      //prints the values of the registers 
-      void print_registers();
+   //prints the values of the registers 
+   void print_registers();
 
-      //prints the status of processor excluding memory
-      void print_status();
+   //prints the status of processor excluding memory
+   void print_status();
 
-      // prints the content of the ROB
-      void print_rob();
+   // prints the content of the ROB
+   void print_rob();
 
-      //prints the content of the reservation stations
-      void print_reservation_stations();
+   //prints the content of the reservation stations
+   void print_reservation_stations();
 
-      //print the content of the instruction window
-	void print_pending_instructions();
+   //print the content of the instruction window
+   void print_pending_instructions();
 
-	//print the whole execution history 
-	void print_log();
+   //print the whole execution history 
+   void print_log();
 };
 
 template <class T> 

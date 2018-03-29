@@ -43,6 +43,9 @@ class sim_ooo{
    struct robT{
       dynInstructPT   dInstP;
       bool            ready;
+      bool            busy;
+      unsigned        dest;
+      unsigned        value;
 
       robT(instructPT instructP){
          dInstP  = new dynInstructT(instructP);
@@ -56,7 +59,9 @@ class sim_ooo{
       bool            busy;
       unsigned        pcRs;
       unsigned        vj;
+      bool            vjR;
       unsigned        vk;
+      bool            vkR;
       int             qj;
       int             qk;
       int             tagD;
@@ -65,6 +70,9 @@ class sim_ooo{
       resStationT(dynInstructPT dynInstP){
          dInstP     = dynInstP;
          busy       = false;
+         vjR        = true;
+         vkR        = true;
+         pcRs       = UNDEFINED;
          vj         = UNDEFINED;
          vk         = UNDEFINED;
          qj         = UNDEFINED;
@@ -94,7 +102,6 @@ class sim_ooo{
    };
 
    struct instructT{
-      unsigned           pc;
       opcode_t           opcode;
       uint32_t           dst;
       uint32_t           src1;
@@ -108,13 +115,13 @@ class sim_ooo{
       bool               src2F;
       bool               is_stall;
       bool               is_branch;
+      bool               is_taken;
 
       instructT(){
          nop();
       }
 
       instructT( instructPT input ){
-         pc         = input->pc;
          opcode     = input->opcode; 
          dst        = input->dst; 
          src1       = input->src1; 
@@ -125,6 +132,7 @@ class sim_ooo{
          src2Valid  = input->src2Valid;
          is_stall   = input->is_stall; 
          is_branch  = input->is_branch;
+         is_taken   = input->is_taken;
          dstF       = input->dstF;
          src1F      = input->src1F;    
          src2F      = input->src2F;    
@@ -145,6 +153,7 @@ class sim_ooo{
          src2Valid  = false;
          is_stall   = false;
          is_branch  = false;
+         is_taken   = false;
          dstF       = false;
          src1F      = false;
          src2F      = false;
@@ -169,7 +178,7 @@ class sim_ooo{
    };
 
    struct execLaneT{
-      instructT      instruct;
+      resStationT*   payloadP;
       int            ttl;
       unsigned       b;
       unsigned       exNpc;
@@ -202,6 +211,7 @@ class sim_ooo{
 
 
    int            cycleCount;
+   unsigned       PC;
 
    instructPT     *instMemory;
    int            instCount;
@@ -267,13 +277,13 @@ class sim_ooo{
    int get_int_register(unsigned reg);
 
    //set the value of the given integer general purpose register to "value"
-   void set_int_register(unsigned reg, int value);
+   void sim_ooo::set_int_register(unsigned reg, int value, int tag, bool busy);
 
    //returns value of the specified floating point general purpose register
    float get_fp_register(unsigned reg);
 
    //set the value of the given floating point general purpose register to "value"
-   void set_fp_register(unsigned reg, float value);
+   void sim_ooo::set_fp_register(unsigned reg, float value, int tag, bool busy);
 
    // returns the index of the ROB entry that will write this integer register (UNDEFINED if the value of the register is not pending
    unsigned get_pending_int_register(unsigned reg);

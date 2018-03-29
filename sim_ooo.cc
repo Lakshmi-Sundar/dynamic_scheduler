@@ -36,6 +36,11 @@ inline unsigned char2unsigned(unsigned char *buffer){
        return buffer[0] + (buffer[1] << 8) + (buffer[2] << 16) + (buffer[3] << 24);
 }
 //-------------------------------------convert functions end-------------------------------------------------------------//
+//
+//TODO:
+//1. Handling multiple branch instructions
+//2. Handling Load/Store dependencies and their respective latency
+//3. 
 
 sim_ooo::sim_ooo(unsigned mem_size,
                 unsigned rob_size,
@@ -77,7 +82,7 @@ void sim_ooo::init_exec_unit(exe_unit_t exec_unit, unsigned latency, unsigned in
 
 void sim_ooo::load_program(const char *filename, unsigned base_address){
    instMemSize            = parse(string(filename), base_address);
-   this->baseAddress      = base_address;
+   this->PC               = base_address;
 }
 
 instructT sim_ooo::fetchInstruction ( unsigned pc ) {
@@ -90,43 +95,256 @@ instructT sim_ooo::fetchInstruction ( unsigned pc ) {
    return instruct;
 }
 
-//-------------------------------issue stage begin-----------------------------------------------------------//
-//TODO: issue stage
-//Fetch N instructions as according to the ISSUE WIDTH
-//Populate ROB by N entries as fetched according to issue width
-//update ROB and its components
-//pass the instructions to reservation stations
-//update tag of general purpose registers
-
-bool sim_ooo::issue( ) {
-   for (int i = 0; i < issueWidth && rob->isFull(); i++){
-      instructT instruct   = fetchInstruction ( pc );
+void sim_ooo::fetch(){
+    for (int j = 0; j < issueWidth && rob->isFull(); j++){
+      //fetching instruction according to PC
+      instructT instruct   = fetchInstruction ( PC );
+      //finding the execution unit of the opcode
       exe_unit_t unit      = opcodeToExUnit(instruct.opcode);
 
-      resStationT* resUnit = resStation[unit];
+      for (int i = 0; i < resStSize[unit]; i++){
+         //Checking if reservation station is busy
+         if (!resStation[unit][i].busy) {
+            robT robEntry               = robT(&instruct);
+            uint32_t robIndex           = rob->push(robEntry);
+            resStation[unit][i].dInstP  = resStationT(robEntry.dInstP);
+            resStation[unit][i].busy    = true;
+            resStation[unit][i].pcRs    = PC;
 
-      for (int i = 0; i < resStSize[unit]; i++) {
-         if(!resUnit[i].busy){
-            robT robEntry      = robT(&instruct);
-            uint32_t robIndex  = rob->push(robEntry);
-            resUnit[i]         = resStationT(robEntry.dInstP);
-            resUnit[i].busy    = true;
-            resUnit[i].vj      = (instruct.src1Valid) ? regRead(instruct.src1, instruct.src1F) : UNDEFINED;
-            resUnit[i].vk      = (instruct.src2Valid) ? regRead(instruct.src2, instruct.src2F) : UNDEFINED;
-            resUnit[i].qj      = (instruct.src1Valid) ? regTag(instruct.src1, instruct.src1F) : UNDEFINED;
-            resUnit[i].qk      = (instruct.src2Valid) ? regTag(instruct.src2, instruct.src2F) : UNDEFINED;
-            resUnit[i].tagD    = robIndex;
+            if(instruct.src1Valid && regBusy(instruct.src1, instruct.src1F)) 
+               resStation[unit][i].vjR  = false; 
+            if(instruct.src2Valid && regBusy(instruct.src2, instruct.src2F))
+               resStation[unit][i].vkR  = false; 
+
+            resStation[unit][i].vj      = (instruct.src1Valid) ? regRead(instruct.src1, instruct.src1F) : UNDEFINED;
+            resStation[unit][i].vk      = (instruct.src2Valid) ? regRead(instruct.src2, instruct.src2F) : UNDEFINED;
+            resStation[unit][i].qj      = (instruct.src1Valid) ? regTag(instruct.src1, instruct.src1F) : UNDEFINED;
+            resStation[unit][i].qk      = (instruct.src2Valid) ? regTag(instruct.src2, instruct.src2F) : UNDEFINED;
+            resStation[unit][i].tagD    = robIndex;
+            //Updating address field of ROB according to memory unit
             if( unit == MEMORY )
-               resUnit[i].addr = instruct.imm;
+               resUnit[i].addr          = instruct.imm;
+            //incrementing PC only if ROB and RS are not full
+            PC                          = PC + 4;
+            //update TAG at register File with ROB entry if destination exists
+            if(instruct.dstValid)
+               if(instruct.dstF)
+                  set_fp_reg_tag(instruct.dst, robIndex, true); 
+               else
+                  set_int_reg_tag(instruct.dst, robIndex, true); 
             break;
          }
       }
-      if( instruct.is_branch )
-         break;
+      //Break if Branch to create a basic block
+      //Since BP = always not taken, do nothing
    }
 }
 
+//1. Check if execute lanes are free.
+//2. Check if RS Station is ready  
+void sim_ooo::dispatch(){
+   //To iterate through reservation station units
+   for(int unit = 0; unit < RS_TOTAL; unit++) {
+      //To iterate through individual units
+      for(int payIndex = 0; payIndex < resStSize[unit]; payIndex++) {
+         //Checking if both operands are ready, hence instruction is ready
+         if (resStation[unit][payIndex].vjR && resStation[unit][payIndex].vkR){
+            //checking for free execution units
+            for(int laneId = 0; laneId < execFp[unit].numLanes; laneId++){
+               if(execFp[unit].lanes[laneId].ttl == 0) {
+                  execFp[unit].lanes[laneId].payloadP    = &(resStation[unit][payIndex]);
+                  // Adding 1 to model 1 unit latency in Write Result
+                  execFp[unit].lanes[laneId].ttl         = () ? execFp[unit].latency + 1;
+                  //TODO: Load / Store latency modelling, check for dependent, or pending stores
+                  break;
+               }
+            }
+         }
+      }
+   }
+}
+
+
+//-------------------------------issue stage begin-----------------------------------------------------------//
+//TODO: Check for the following
+//1. Structural hazards taken care before populating ROB and RS?
+//2. ROB Updated?
+//3. RS Updated with all entries?
+//4. Register file updated with Tag and set busy?
+
+//TODO:
+//1. Check if EXEC UNITS are FREE and if source values are available.
+//2. Push into Exec Unit when both conditions are satisfied.
+void sim_ooo::issue( ) {
+   //Issuing N instructions and checking if ROB is full
+   fetch();
+   dispatch();
+}
+
 //-------------------------------issue stage end-------------------------------------------------------------//
+
+
+//-------------------------------------------------------------execute stage---------------------------------//
+instructT sim_ooo::execInst(int& count, uint32_t& b, uint32_t& npc){
+   instructT instruct;
+   count = 0;
+   for(int i = 0; i < EXEC_UNIT_TOTAL; i++){
+      for(int j = 0; j < execFp[i].numLanes; j++){
+         if( execFp[i].lanes[j].ttl != 0 ) {
+            execFp[i].lanes[j].ttl--;
+            if( execFp[i].lanes[j].ttl == 0 ) {
+            }
+         } else{
+         }
+      }
+   }
+   ASSERT ( count <= 1, "STRUCTURAL HAZARD AT MEM DETECTED" );
+   return instruct;
+}
+
+//To get the maximum ttl at a particular lane in the execution unit
+int sim_ooo::getMaxTtl() {
+   int ttl = 0;
+   for(int i = 0; i < EXEC_UNIT_TOTAL; i++){
+      for(int j = 0; j < execFp[i].numLanes; j++){
+         ttl = max(ttl, execFp[i].lanes[j].ttl);
+      }
+   }
+   return ttl;
+}
+
+void sim_ooo::execute() {
+
+   for(int unit = 0; unit < RS_TOTAL; unit++) { 
+      for(int j = 0; j < execFp[unit].numLanes; j++){
+         if(execFp[unit].lanes[j].ttl == 0) {
+            //-----------------------//
+         }
+      }
+   }
+
+   for(int j = 0; j < execFp[opcodeToExUnit(instruct.opcode)].numLanes; j++){
+      if(execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl == 0) {
+         execFp[opcodeToExUnit(instruct.opcode)].lanes[j].instruct = instruct;
+         if(instruct.opcode == EOP) {
+            execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl   = getMaxTtl() + 1;
+         }
+         else 
+            execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl   = instruct.is_stall ? 0 : exLatency(instruct.opcode);
+         execFp[opcodeToExUnit(instruct.opcode)].lanes[j].b        = pipeReg[EX][B];
+         execFp[opcodeToExUnit(instruct.opcode)].lanes[j].exNpc    = pipeReg[EX][NPC];
+         break;
+      }
+   }
+
+   int count;
+   uint32_t b;
+   uint32_t npc;
+   instruct = execInst(count, b, npc);
+
+   if(count != 0) {
+      uint32_t src1 = instruct.src1;
+      uint32_t src2 = instruct.src2;
+      bool src1F    = instruct.src1F;
+      bool src2F    = instruct.src2F;
+
+      this->pipeReg[MEM][B] = b;
+      switch(instruct.opcode) {
+         case LW ... SWS:
+            pipeReg[MEM][ALU_OUTPUT] = agen (instruct);
+            break;
+
+         case ADD ... DIV:
+         case ADDS ... DIVS:
+            pipeReg[MEM][ALU_OUTPUT] = alu(regRead(src1, src1F), regRead(src2, src2F), src1F, src2F, instruct.opcode);
+            break;
+
+         case ADDI ... ANDI:
+            pipeReg[MEM][ALU_OUTPUT] = alu(regRead(src1, src1F), instruct.imm, src1F, false, instruct.opcode);
+            break;
+
+         case BLTZ:
+            pipeReg[MEM][COND]       = regRead(src1, src1F) < 0;
+            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
+            break;
+
+         case BNEZ:
+            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
+            pipeReg[MEM][COND]       = regRead(src1, src1F) != 0;
+            break;
+
+         case BEQZ:
+            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
+            pipeReg[MEM][COND]       = regRead(src1, src1F) == 0;
+            break;
+
+         case BGTZ:
+            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
+            pipeReg[MEM][COND]       = regRead(src1, src1F) > 0;
+            break;
+
+         case BGEZ:
+            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
+            pipeReg[MEM][COND]       = regRead(src1, src1F) >= 0;
+            break;
+
+         case BLEZ:
+            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
+            pipeReg[MEM][COND]       = regRead(src1, src1F) <= 0;
+            break;
+
+         case JUMP:
+            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
+            pipeReg[MEM][COND]       = 1;
+            break;
+
+         case NOP:
+         case EOP:
+            break;
+
+         default:
+            ASSERT(false, "Unknown operation encountered");
+            break;
+      }
+   }
+   this->instrArray[MEM] = instruct;
+   memFlag               = memLatency;
+}
+
+//---------------------------------------------------------------------------------------------------------//
+
+
+void sim_ooo::run(unsigned cycles){
+}
+
+//reset the state of the sim_oooulator
+void sim_ooo::reset(){
+   this->data_memory       = new unsigned char[dataMemSize];
+   for(unsigned i = 0; i < this->dataMemSize; i++) {
+      this->data_memory[i] = UNDEFINED; 
+   }
+
+   //initializing Instruction Array to UNDEFINED
+   for(int i = 0; i < NUM_STAGES; i++) {
+      this->instrArray[i].stall();
+   }
+
+   //initializing GPRs to UNDEFINED
+   for(int i = 0; i < NUM_GP_REGISTERS; i++) {
+      this->gprFile[i].value = UNDEFINED;
+      this->gprFile[i].tag   = UNDEFINED;
+      this->gprFile[i].busy  = false;
+   }
+
+   //initializing FP registers to UNDEFINED
+   for(int i = 0; i < NUM_FP_REGISTERS; i++) {
+      this->fpFile[i].value = UNDEFINED;
+      this->fpFile[i].tag   = UNDEFINED;
+      this->fpFile[i].busy  = false;
+   }
+}
+
+//--------------------------------------- IMPORTANT FUNCTIONS ---------------------------------------------//
 
 bool sim_ooo::regBusy(uint32_t regNo, bool isF) {
    return isF ? fpFile[regNo].busy : gprFile[regNo].busy;
@@ -292,209 +510,45 @@ unsigned sim_ooo::alu (unsigned _value1, unsigned _value2, bool value1F, bool va
    return output;
 }
 
-//-------------------------------------------------------------------------------------------------------------------------------------------//
-
-//-------------------------------------------------------------execute stage-----------------------------------------------------------------//
-instructT sim_ooo::execInst(int& count, uint32_t& b, uint32_t& npc){
-   instructT instruct;
-   count = 0;
-   for(int i = 0; i < EXEC_UNIT_TOTAL; i++){
-      for(int j = 0; j < execFp[i].numLanes; j++){
-         if( execFp[i].lanes[j].ttl != 0 ) {
-            execFp[i].lanes[j].ttl--;
-            if( execFp[i].lanes[j].ttl == 0 ) {
-               count++;
-               instruct = execFp[i].lanes[j].instruct;
-               b        = execFp[i].lanes[j].b;
-               npc      = execFp[i].lanes[j].exNpc;
-            }
-         } else{
-            execFp[i].lanes[j].instruct.stall();
-         }
-      }
-   }
-   ASSERT ( count <= 1, "STRUCTURAL HAZARD AT MEM DETECTED" );
-   return instruct;
-}
-
-//To get the maximum ttl at a particular lane in the execution unit
-int sim_ooo::getMaxTtl() {
-   int ttl = 0;
-   for(int i = 0; i < EXEC_UNIT_TOTAL; i++){
-      for(int j = 0; j < execFp[i].numLanes; j++){
-         ttl = max(ttl, execFp[i].lanes[j].ttl);
-      }
-   }
-   return ttl;
-}
-
-void sim_ooo::execute() {
-
-   for(int unit = 0; unit < RS_TOTAL; unit++) { 
-      for(int j = 0; j < execFp[unit].numLanes; j++){
-         if(execFp[unit].lanes[j].ttl == 0) {
-            resStation[] //TODO: start here!!
-
-         }
-      }
-   }
-
-
-   for(int j = 0; j < execFp[opcodeToExUnit(instruct.opcode)].numLanes; j++){
-      if(execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl == 0) {
-         execFp[opcodeToExUnit(instruct.opcode)].lanes[j].instruct = instruct;
-         if(instruct.opcode == EOP) {
-            execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl   = getMaxTtl() + 1;
-         }
-         else 
-            execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl   = instruct.is_stall ? 0 : exLatency(instruct.opcode);
-         execFp[opcodeToExUnit(instruct.opcode)].lanes[j].b        = pipeReg[EX][B];
-         execFp[opcodeToExUnit(instruct.opcode)].lanes[j].exNpc    = pipeReg[EX][NPC];
-         break;
-      }
-   }
-
-   int count;
-   uint32_t b;
-   uint32_t npc;
-   instruct = execInst(count, b, npc);
-
-   if(count != 0) {
-      uint32_t src1 = instruct.src1;
-      uint32_t src2 = instruct.src2;
-      bool src1F    = instruct.src1F;
-      bool src2F    = instruct.src2F;
-
-      this->pipeReg[MEM][B] = b;
-      switch(instruct.opcode) {
-         case LW ... SWS:
-            pipeReg[MEM][ALU_OUTPUT] = agen (instruct);
-            break;
-
-         case ADD ... DIV:
-         case ADDS ... DIVS:
-            pipeReg[MEM][ALU_OUTPUT] = alu(regRead(src1, src1F), regRead(src2, src2F), src1F, src2F, instruct.opcode);
-            break;
-
-         case ADDI ... ANDI:
-            pipeReg[MEM][ALU_OUTPUT] = alu(regRead(src1, src1F), instruct.imm, src1F, false, instruct.opcode);
-            break;
-
-         case BLTZ:
-            pipeReg[MEM][COND]       = regRead(src1, src1F) < 0;
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            break;
-
-         case BNEZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) != 0;
-            break;
-
-         case BEQZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) == 0;
-            break;
-
-         case BGTZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) > 0;
-            break;
-
-         case BGEZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) >= 0;
-            break;
-
-         case BLEZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) <= 0;
-            break;
-
-         case JUMP:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = 1;
-            break;
-
-         case NOP:
-         case EOP:
-            break;
-
-         default:
-            ASSERT(false, "Unknown operation encountered");
-            break;
-      }
-   }
-   this->instrArray[MEM] = instruct;
-   memFlag               = memLatency;
-}
-
-//-------------------------------------------------------------------------------------------------------------------------------------------//
-
-
-void sim_ooo::run(unsigned cycles){
-}
-
-//reset the state of the sim_oooulator
-void sim_ooo::reset(){
-   this->data_memory       = new unsigned char[dataMemSize];
-   for(unsigned i = 0; i < this->dataMemSize; i++) {
-      this->data_memory[i] = UNDEFINED; 
-   }
-
-   //initializing Instruction Array to UNDEFINED
-   for(int i = 0; i < NUM_STAGES; i++) {
-      this->instrArray[i].stall();
-   }
-
-   //initializing GPRs to UNDEFINED
-   for(int i = 0; i < NUM_GP_REGISTERS; i++) {
-      this->gprFile[i].value = UNDEFINED;
-   }
-
-   //initializing FP registers to UNDEFINED
-   for(int i = 0; i < NUM_FP_REGISTERS; i++) {
-      this->fpFile[i].value = UNDEFINED;
-   }
-
-   //initializing pipeline registers to UNDEFINED
-   for(int i = 0; i < NUM_STAGES; i++) {
-      for(int j = 0; j < NUM_SP_REGISTERS; j++) {
-         this->pipeReg[i][j]  = UNDEFINED;
-      }
-      this->pipeReg[i][COND]  = 0;
-   }
-}
+//---------------------------------------------------------------------------------------------------------//
 
 //------------------------------------SETTER/GETTER functions----------------------------------------------//
 
+//TODO check for better way to call value/tag using same function
 unsigned sim_ooo::regRead(unsigned reg, bool isF){
    if(regBusy(reg, isF)) return UNDEFINED;
    return isF ? float2unsigned(fpFile[reg].value) : gprFile[reg].value;
 }
 unsigned sim_ooo::regTag(unsigned reg, bool isF){
-   if(regBusy(reg, isF)) return UNDEFINED;
-   return isF ? fpFile[reg].tag : gprFile[reg].tag;
+   if(regBusy(reg, isF)) return isF ? fpFile[reg].tag : gprFile[reg].tag;
+   return UNDEFINED;
 }
-
 
 int sim_ooo::get_int_register(unsigned reg){
 	return gprFile[reg].value; 
 }
 
+//TODO: Check if this is necessary
 void sim_ooo::set_int_register(unsigned reg, int value){
    gprFile[reg].value = value;
-   if(gprFile[reg].busy != 0)
-      gprFile[reg].busy--;
 }
 
 float sim_ooo::get_fp_register(unsigned reg){
 	return fpFile[reg].value;
 }
 
+//TODO: Check if this is necessary
 void sim_ooo::set_fp_register(unsigned reg, float value){
    fpFile[reg].value = value;
-   if(fpFile[reg].busy != 0)
-      fpFile[reg].busy--;
+}
+void sim_ooo::set_fp_reg_tag(unsigned reg, int tag, bool busy){
+   fpFile[reg].tag   = tag;
+   fpFile[reg].busy  = busy;
+}
+
+void sim_ooo::set_int_reg_tag(unsigned reg, int tag, bool busy){
+   gprFile[reg].tag   = tag;
+   gprFile[reg].busy  = busy;
 }
 
 unsigned sim_ooo::get_pending_int_register(unsigned reg){

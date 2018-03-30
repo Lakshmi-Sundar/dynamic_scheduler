@@ -66,12 +66,14 @@ class sim_ooo{
       int             qk;
       int             tagD;
       int             addr;
+      bool            inExec;
 
       resStationT(dynInstructPT dynInstP){
          dInstP     = dynInstP;
          busy       = false;
          vjR        = true;
          vkR        = true;
+         inExec     = false;
          pcRs       = UNDEFINED;
          vj         = UNDEFINED;
          vk         = UNDEFINED;
@@ -180,8 +182,6 @@ class sim_ooo{
    struct execLaneT{
       resStationT*   payloadP;
       int            ttl;
-      unsigned       b;
-      unsigned       exNpc;
 
       execLaneT(){
          ttl            = 0;
@@ -227,7 +227,7 @@ class sim_ooo{
    unsigned       memFlag;
    unsigned       baseAddress;
 
-   resStationT    *resStation[];
+   vector <resStationT*>  resStation[RS_TOTAL];
    unsigned       resStSize[];
 
    unsigned       robSize;
@@ -235,7 +235,7 @@ class sim_ooo{
 
    //----------------------------------------------------------------------------//
 
-   Fifo <robT> *rob;
+   Fifo <robT> *robP;
    public:
 
    /* Instantiates the simulator
@@ -359,5 +359,6 @@ class Fifo {
       bool isFull();
       bool isEmpty();
       uint32_t getSize();
+      uint32_t genIndex( uint32_t ith );
 };
 #endif /*SIM_OOO_H_*/

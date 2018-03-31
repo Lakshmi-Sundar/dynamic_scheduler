@@ -58,7 +58,7 @@ sim_ooo::sim_ooo(unsigned mem_size,
    //Allocating issue queue, ROB, reservation stations
 	data_memory            = new unsigned char[data_memory_size];
    issueQ                 = new instructT[max_issue];
-   robP                   = new Fifo<robT>( rob_size );
+   rob                    = Fifo<robT*>( rob_size );
 
    reset();
 }
@@ -69,11 +69,12 @@ sim_ooo::~sim_ooo(){
 void sim_ooo::init_exec_unit(exe_unit_t exec_unit, unsigned latency, unsigned instances){
    //TODO: Check the latency and how it is implemented
    execFp[exec_unit].init(instances, latency);
+   WrFp[exec_unit].init(instances, latency);
 }
 
 void sim_ooo::load_program(const char *filename, unsigned base_address){
-   instMemSize            = parse(string(filename), base_address);
-   this->PC               = base_address;
+   instMemSize               = parse(string(filename), base_address);
+   this->PC                  = base_address;
 }
 
 instructT sim_ooo::fetchInstruction ( unsigned pc ) {
@@ -85,25 +86,36 @@ instructT sim_ooo::fetchInstruction ( unsigned pc ) {
    return instruct;
 }
 
+//TODO: Check for the following
+//1. Structural hazards taken care before populating ROB and RS?
+//2. ROB Updated?
+//3. RS Updated with all entries?
+//4. Register file updated with Tag and set busy?
+// The following function is for IF + ID + RR
 void sim_ooo::fetch(){
-    for (int j = 0; j < issueWidth && robP->isFull(); j++){
+    for (int j = 0; j < issueWidth && rob.isFull(); j++){
       //fetching instruction according to PC
-      instructT instruct   = fetchInstruction ( PC );
+      instructT instruct     = fetchInstruction ( PC );
       //finding the execution unit of the opcode
-      exe_unit_t unit      = opcodeToExUnit(instruct.opcode);
+      exe_unit_t unit        = opcodeToExUnit(instruct.opcode);
 
+      // Assert for overflown reservation station
+      ASSERT(resStation[unit].size() <= resStSize[unit] , "Illegal resStation size found (%d > %d)", resStation[unit].size(), resStSize[unit]);
+
+      //Checking if reservation station is not full 
       if (resStation[unit].size() != resStSize[unit]) {
-         //Checking if reservation station is not busy
-         robT robEntry       = robT(&instruct);
-         uint32_t robIndex   = robP->push(robEntry);
-         resStationT* resP   = new resStationT(robEntry.dInstP);
-         resP->busy          = true;
-         resP->pcRs          = PC;
-         resP->vj            = (instruct.src1Valid) ? regRead(instruct.src1, instruct.src1F) : UNDEFINED;
-         resP->vk            = (instruct.src2Valid) ? regRead(instruct.src2, instruct.src2F) : UNDEFINED;
-         resP->qj            = (instruct.src1Valid) ? regTag(instruct.src1, instruct.src1F) : UNDEFINED;
-         resP->qk            = (instruct.src2Valid) ? regTag(instruct.src2, instruct.src2F) : UNDEFINED;
-         resP->tagD          = robIndex;
+         //TODO: Check for correctness
+         robT* robEntryP        = new robT(&instruct);
+         robEntryP->busy        = true;
+         uint32_t robIndex      = rob.push(robEntryP);
+
+         resStationT* resP      = new resStationT(robEntryP->dInstP);
+         resP->pcRs             = PC;
+         resP->vj               = (instruct.src1Valid) ? regRead(instruct.src1, instruct.src1F) : UNDEFINED;
+         resP->vk               = (instruct.src2Valid) ? regRead(instruct.src2, instruct.src2F) : UNDEFINED;
+         resP->qj               = (instruct.src1Valid) ? regTag(instruct.src1, instruct.src1F)  : UNDEFINED;
+         resP->qk               = (instruct.src2Valid) ? regTag(instruct.src2, instruct.src2F)  : UNDEFINED;
+         resP->tagD             = robIndex;
 
          //setting bits for values ready/not ready
          if(instruct.src1Valid && regBusy(instruct.src1, instruct.src1F)) 
@@ -111,12 +123,15 @@ void sim_ooo::fetch(){
          if(instruct.src2Valid && regBusy(instruct.src2, instruct.src2F))
             resP->vkR  = false; 
 
-         //Updating address field of ROB according to memory unit
+         //Updating address field of reservation station entry according to memory unit
          if( unit == MEMORY )
-            resUnit[i].addr          = instruct.imm;
+            resP->addr          = instruct.imm;
+
+         // Add an entry in reservation station
+         resStation[unit].push_back( resP );
 
          //incrementing PC only if ROB and RS are not full
-         PC                          = PC + 4;
+         PC                     = PC + 4;
 
          //update TAG at register File with ROB entry if destination exists
          if(instruct.dstValid)
@@ -124,7 +139,7 @@ void sim_ooo::fetch(){
                set_fp_reg_tag(instruct.dst, robIndex, true); 
             else
                set_int_reg_tag(instruct.dst, robIndex, true); 
-         resStation[unit].push_back( resP );
+
          break;
       }
       //Break if Branch to create a basic block
@@ -132,11 +147,14 @@ void sim_ooo::fetch(){
    }
 }
 
-//TODO: 0. Load / Store latency modelling, check for dependent, or pending stores
+//0. Load / Store latency modelling, check for dependent, or pending stores
 //1. Maintain program order while issuing into exec. 
 //2. SWS after LWS need not require LWS Stalling
 //3. If SWS (not ready) before LWS (ready), LWS has to stall.
 //4. WHATEVER IS IN RES STATION HAS ALREADY GONE INTO EXEC UNIT (inExec checks for that)
+//4. Check if EXEC UNITS are FREE and if source values are available.
+//5. Push into Exec Unit when both conditions are satisfied.
+// The following function is for IS
 void sim_ooo::dispatch(){
    //To iterate through reservation station units
    for(int unit = 0; unit < RS_TOTAL; unit++) {
@@ -144,17 +162,41 @@ void sim_ooo::dispatch(){
       for(int payIndex = 0; payIndex < resStation[unit].size(); payIndex++) {
          //Checking if both operands are ready, hence instruction is ready and it is not in execute stage
          resStationT* resP = resStation[unit][payIndex];
-         bool isLoad       = (resP->dInstP->opcode == LW) || (resP->dInstP->opcode == LWS);
+
+         bool instReady    = true;
+         bool bypassReady  = false;
+         bool bypassValue  = UNDEFINED;
+         bool is_store     = resP->dInstP->is_store;
+         bool is_load      = resP->dInstP->is_load;
          uint32_t addr     = agen(*(resP->dInstP));
-         if (resP->busy && !resP->inExec && resP->vjR && resP->vkR && (!isLoad || (isLoad && isConflictingStore(resP->tagD, addr))) ){
+
+         if( is_load ){
+            instReady      = isConflictingStore(resP->tagD, addr, bypassReady, bypassValue);
+         } 
+
+         if ( !resP->inExec && resP->vjR && resP->vkR && instReady ){
             int execUnit   = opcodeToExUnit(resP->dInstP->opcode);
             for(int laneId = 0; laneId < execFp[execUnit].numLanes; laneId++){
                //checking for free execution units
                if(execFp[execUnit].lanes[laneId].ttl == 0) {
-                  resP->inExec                               = true;
-                  execFp[execUnit].lanes[laneId].payloadP    = resP;
+                  resP->inExec                            = true;
+                  execFp[execUnit].lanes[laneId].payloadP = resP;
+                  // How much time will the operation take to complete
+                  // 1. Stores take 1 cycle
+                  // 2. Bypassed loads take 1 cycle
+                  // 3. Remaining takes set cycles
+                  uint32_t ttl                            = (is_store ? 1 : ((is_load && bypassReady) ? 1 : execFp[execUnit].latency) );
                   // Adding 1 to model 1 unit latency in Write Result
-                  execFp[execUnit].lanes[laneId].ttl         = execFp[execUnit].latency + 1;
+                  execFp[execUnit].lanes[laneId].ttl      = ttl + 1;
+                  
+                  // Setting up outputs
+                  execFp[execUnit].outputReady            = is_load && bypassReady;
+                  execFp[execUnit].output                 = (is_load && bypassReady) ? bypassValue : UNDEFINED;
+                  if( is_store ){
+                     // ROB is acting as a store buffer
+                     // Update addr in ROB
+                     rob.peekIndex( resP->tagD )->dest    = addr;
+                  }
                   break;
                }
             }
@@ -162,176 +204,168 @@ void sim_ooo::dispatch(){
       }
    }
 }
-bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress){
-   bool conflict      = false;
-   for(int i = 0; i < robP->getCount(); i++){
-      int tag         = robP->genIndex(i);
-      opcode_t opcode = robP->peekNth(i)->dInstP->opcode;
 
-      if( (opcode == SW || opcode == SWS) ) {
-         if(!robP->peekNth(i)->ready)
-            bool conflict      = true;
-         else if(robP->peekNth(i)->dest == memAddress)
-            bool conflict      = false;
+//checking for conflicting store with a load instruction
+bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassReady, uint32_t& bypassValue ){
+   bool conflict               = false;
+   bypassReady                 = false;
+   for(int i = 0; i < rob.getCount(); i++){
+      //getting the current tag
+      int tag                  = rob.genIndex(i);
+      //Get the ROB entry
+      robT* robEntryP          = rob.peekNth(i);
+
+      //checking if the opcode is store
+      if( robEntryP->dInstP->is_store ){
+         //if the store is not complete (a.k.a ??), then there is a conflict
+         if(!robEntryP->ready){
+            conflict           = true;
+            bypassReady        = false;
+         }
+         //if store is complete and match the address, no conflict.
+         //values are stored from this store to load temporarily
+         else if(robEntryP->dest == memAddress){
+            conflict           = false;
+            bypassReady        = true;
+            bypassValue        = robEntryP->value;
+         }
       }
       if(tag == loadTag)
+         //returns the most recent conflict entry
          return conflict;
    }
 }
 
 //-------------------------------issue stage begin-----------------------------------------------------------//
-//TODO: Check for the following
-//1. Structural hazards taken care before populating ROB and RS?
-//2. ROB Updated?
-//3. RS Updated with all entries?
-//4. Register file updated with Tag and set busy?
-
-//TODO:
-//1. Check if EXEC UNITS are FREE and if source values are available.
-//2. Push into Exec Unit when both conditions are satisfied.
-void sim_ooo::issue( ) {
-   //Issuing N instructions and checking if ROB is full
+void sim_ooo::issue() {
    fetch();
    dispatch();
 }
-
 //-------------------------------issue stage end-------------------------------------------------------------//
-
-
 //-------------------------------------------------------------execute stage---------------------------------//
-instructT sim_ooo::execInst(int& count, uint32_t& b, uint32_t& npc){
-   instructT instruct;
-   count = 0;
-   for(int i = 0; i < EXEC_UNIT_TOTAL; i++){
+//1. Model latency of the functional units.
+//Do ttl--, as long as ttl != 1, keep decrementing and keep the instruction in exec and res station. 
+//as ttl == 1, move it to WR, meaning remove it from Res Station, and exec unit (set isExec/ttl=0 false).
+//When there is a LWS, check if there is a dependent store, pass the value to it. (isDep)
+//2. Check for LOAD BYPASS and latency is 1. Else latency is Mem Latency.
+//3. Take bypass from store, if there is a dependent store. 
+//4. Update memory address of load/store.
+void sim_ooo::execute(){
+   //iterating through execution units
+   for(int i = 0; i < EX_TOTAL; i++){
+      //iterating through number of instances of an EXEC UNIT
       for(int j = 0; j < execFp[i].numLanes; j++){
-         if( execFp[i].lanes[j].ttl != 0 ) {
-            execFp[i].lanes[j].ttl--;
-            if( execFp[i].lanes[j].ttl == 0 ) {
+         execWrLaneT* laneP = &(execFp[i].lanes[j]);
+
+         //Checking if TTL of the lane is not zero
+         if( laneP->ttl != 0 ) {
+            laneP->ttl--;
+
+            //local variable for payloadP in exec unit
+            resStationT* resP             = laneP->payloadP;
+            // 1 implies Write Result
+            if( laneP->ttl == 1 ) {
+               // It's time to execute!!
+               if( !laneP->outputReady )
+                  laneP->output           = aluGetOutput(resP->dInstP);
+               laneP->outputReady         = true;
+
+               // vk has to be updated for all loads
+               if( resP->dInstP->is_load )
+                  resP->vk                = laneP->output;
             }
-         } else{
-         }
+         } 
       }
    }
-   ASSERT ( count <= 1, "STRUCTURAL HAZARD AT MEM DETECTED" );
-   return instruct;
 }
 
-//To get the maximum ttl at a particular lane in the execution unit
-int sim_ooo::getMaxTtl() {
-   int ttl = 0;
-   for(int i = 0; i < EXEC_UNIT_TOTAL; i++){
-      for(int j = 0; j < execFp[i].numLanes; j++){
-         ttl = max(ttl, execFp[i].lanes[j].ttl);
-      }
-   }
-   return ttl;
-}
+uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, bool& misPred){
+   uint32_t src1   = dInstP->src1;
+   uint32_t src2   = dInstP->src2;
+   bool src1F      = dInstP->src1F;
+   bool src2F      = dInstP->src2F;
+   opcode_t opcode = dInstP->opcode;
 
-void sim_ooo::execute() {
-
-   for(int unit = 0; unit < RS_TOTAL; unit++) { 
-      for(int j = 0; j < execFp[unit].numLanes; j++){
-         if(execFp[unit].lanes[j].ttl == 0) {
-            //-----------------------//
-         }
-      }
-   }
-
-   for(int j = 0; j < execFp[opcodeToExUnit(instruct.opcode)].numLanes; j++){
-      if(execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl == 0) {
-         execFp[opcodeToExUnit(instruct.opcode)].lanes[j].instruct = instruct;
-         if(instruct.opcode == EOP) {
-            execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl   = getMaxTtl() + 1;
-         }
-         else 
-            execFp[opcodeToExUnit(instruct.opcode)].lanes[j].ttl   = exLatency(instruct.opcode);
+   switch(opcode) {
+      case LW ... SWS:
+         return read_memory (resP->addr);
          break;
+
+      case ADD ... DIV:
+      case ADDS ... DIVS:
+         return alu(regRead(src1, src1F), regRead(src2, src2F), src1F, src2F, opcode);
+         break;
+
+      case ADDI ... ANDI:
+         return alu(regRead(src1, src1F), instruct.imm, src1F, false, opcode);
+         break;
+
+      case BLTZ:
+         misPred = regRead(src1, src1F) < 0;
+         return alu(npc, instruct.imm, false, false, opcode);
+         break;
+
+      case BNEZ:
+         misPred = regRead(src1, src1F) != 0;
+         return alu(npc, instruct.imm, false, false, opcode);
+         break;
+
+      case BEQZ:
+         misPred = regRead(src1, src1F) == 0;
+         return alu(npc, instruct.imm, false, false, opcode);
+         break;
+
+      case BGTZ:
+         misPred = regRead(src1, src1F) > 0;
+         return alu(npc, instruct.imm, false, false, opcode);
+         break;
+
+      case BGEZ:
+         misPred = regRead(src1, src1F) >= 0;
+         return alu(npc, instruct.imm, false, false, opcode);
+         break;
+
+      case BLEZ:
+         misPred = regRead(src1, src1F) <= 0;
+         return alu(npc, instruct.imm, false, false, opcode);
+         break;
+
+      case JUMP:
+         misPred = 1;
+         return alu(npc, instruct.imm, false, false, opcode);
+         break;
+
+      case NOP:
+      case EOP:
+         break;
+
+      default:
+         ASSERT(false, "Unknown operation encountered");
+         return UNDEFINED;
+         break;
+   }
+   return UNDEFINED;
+}
+//-----------------------------------WRITE RESULT STAGE MOSTLY---------------------------------------------//
+//TODO:
+//1. Update ROB
+//2. Wake up RS
+void sim_ooo::writeResult(){
+   for(int i = 0; i < EX_TOTAL; i++){
+      for(int j = 0; j < wrFp[i].numLanes; j++){
+         resStationT* resP       = wrFp[i].lanes[j].payloadP;
+         if(wrFp[i].lanes[j].wr)
       }
    }
-
-   int count;
-   uint32_t b;
-   uint32_t npc;
-   instruct = execInst(count, b, npc);
-
-   if(count != 0) {
-      uint32_t src1 = instruct.src1;
-      uint32_t src2 = instruct.src2;
-      bool src1F    = instruct.src1F;
-      bool src2F    = instruct.src2F;
-
-      this->pipeReg[MEM][B] = b;
-      switch(instruct.opcode) {
-         case LW ... SWS:
-            pipeReg[MEM][ALU_OUTPUT] = agen (instruct);
-            break;
-
-         case ADD ... DIV:
-         case ADDS ... DIVS:
-            pipeReg[MEM][ALU_OUTPUT] = alu(regRead(src1, src1F), regRead(src2, src2F), src1F, src2F, instruct.opcode);
-            break;
-
-         case ADDI ... ANDI:
-            pipeReg[MEM][ALU_OUTPUT] = alu(regRead(src1, src1F), instruct.imm, src1F, false, instruct.opcode);
-            break;
-
-         case BLTZ:
-            pipeReg[MEM][COND]       = regRead(src1, src1F) < 0;
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            break;
-
-         case BNEZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) != 0;
-            break;
-
-         case BEQZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) == 0;
-            break;
-
-         case BGTZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) > 0;
-            break;
-
-         case BGEZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) >= 0;
-            break;
-
-         case BLEZ:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = regRead(src1, src1F) <= 0;
-            break;
-
-         case JUMP:
-            pipeReg[MEM][ALU_OUTPUT] = alu(npc, instruct.imm, false, false, instruct.opcode);
-            pipeReg[MEM][COND]       = 1;
-            break;
-
-         case NOP:
-         case EOP:
-            break;
-
-         default:
-            ASSERT(false, "Unknown operation encountered");
-            break;
-      }
-   }
-   this->instrArray[MEM] = instruct;
-   memFlag               = memLatency;
 }
 
 //---------------------------------------------------------------------------------------------------------//
-
 
 void sim_ooo::run(unsigned cycles){
 }
 
 //reset the state of the sim_oooulator
 void sim_ooo::reset(){
-   this->data_memory       = new unsigned char[dataMemSize];
    for(unsigned i = 0; i < this->dataMemSize; i++) {
       this->data_memory[i] = UNDEFINED; 
    }
@@ -359,7 +393,7 @@ void sim_ooo::reset(){
       resStation[i].clear();
    }
    //Clearing ROB
-   robP->popAll();
+   rob.popAll();
 }
 
 //--------------------------------------- IMPORTANT FUNCTIONS ---------------------------------------------//
@@ -596,11 +630,22 @@ void sim_ooo::print_memory(unsigned start_address, unsigned end_address){
 	} 
 }
 
+//---------------------------READ AND WRITE MEMORY FUNCTIONS BEGIN--------------------------------------//
+
 void sim_ooo::write_memory(unsigned address, unsigned value){
+   ASSERT( address % 4 == 0, "Unaligned memory access found at address %x", address ); 
+   ASSERT ( (address >= 0) && (address < dataMemSize), "Out of bounds memory accessed: Seg Fault!!!!" );
 	unsigned2char(value,data_memory+address);
 }
 
-//-------------------------------------------------------------------------------------------------------------------------------------------//
+unsigned sim_ooo::read_memory(unsigned address){
+   ASSERT( address % 4 == 0, "Unaligned memory access found at address %x", address ); 
+   ASSERT ( (address >= 0) && (address < dataMemSize), "Out of bounds memory accessed: Seg Fault!!!!" );
+   return char2unsigned(data_memory+address);
+}
+//---------------------------READ AND WRITE MEMORY FUNCTIONS END----------------------------------------//
+
+//------------------------------------------------------------------------------------------------------//
 void sim_ooo::print_registers(){
         unsigned i;
 	cout << "GENERAL PURPOSE REGISTERS" << endl;
@@ -1006,6 +1051,7 @@ int sim_ooo::parse( const string filename, unsigned base_address ){
             getReg( buff_iss, instructP->src1, instructP->src1F, true );
             instructP->dstValid   = true;
             instructP->src1Valid  = true;
+            instructP->is_load    = true;
             break;
 
          case SW:
@@ -1022,6 +1068,7 @@ int sim_ooo::parse( const string filename, unsigned base_address ){
             getReg( buff_iss, instructP->src1, instructP->src1F, true );
             instructP->src2Valid  = true;
             instructP->src1Valid  = true;
+            instructP->is_store   = true;
             break;
 
          case EOP:

@@ -46,17 +46,21 @@ class sim_ooo{
       bool            busy;
       unsigned        dest;
       unsigned        value;
+      uint32_t        memLatency;
 
       robT(instructPT instructP){
-         dInstP  = new dynInstructT(instructP);
-         ready   = false;
+         dInstP     = new dynInstructT(instructP);
+         ready      = false;
+         busy       = false;
+         dest       = dInstP->dst;
+         value      = UNDEFINED;
+         memLatency = 0;
       }
    }
 
    //Data structure for Reservation Station
    struct resStationT{
       dynInstructPT   dInstP;
-      bool            busy;
       unsigned        pcRs;
       unsigned        vj;
       bool            vjR;
@@ -66,14 +70,13 @@ class sim_ooo{
       int             qk;
       int             tagD;
       int             addr;
+
       bool            inExec;
 
       resStationT(dynInstructPT dynInstP){
          dInstP     = dynInstP;
-         busy       = false;
          vjR        = true;
          vkR        = true;
-         inExec     = false;
          pcRs       = UNDEFINED;
          vj         = UNDEFINED;
          vk         = UNDEFINED;
@@ -81,6 +84,8 @@ class sim_ooo{
          qk         = UNDEFINED; 
          tagD       = UNDEFINED; 
          addr       = UNDEFINED;
+
+         inExec     = false;
       }
 
    }
@@ -118,6 +123,8 @@ class sim_ooo{
       bool               is_stall;
       bool               is_branch;
       bool               is_taken;
+      bool               is_load;
+      bool               is_store;
 
       instructT(){
          nop();
@@ -135,6 +142,8 @@ class sim_ooo{
          is_stall   = input->is_stall; 
          is_branch  = input->is_branch;
          is_taken   = input->is_taken;
+         is_store   = input->is_store;
+         is_load    = input->is_load;
          dstF       = input->dstF;
          src1F      = input->src1F;    
          src2F      = input->src2F;    
@@ -156,6 +165,8 @@ class sim_ooo{
          is_stall   = false;
          is_branch  = false;
          is_taken   = false;
+         is_store   = false;
+         is_load    = false;
          dstF       = false;
          src1F      = false;
          src2F      = false;
@@ -179,22 +190,26 @@ class sim_ooo{
       int            tag;
    };
 
-   struct execLaneT{
+   struct execWrLaneT{
       resStationT*   payloadP;
       int            ttl;
+      bool           wr;
+      uint32_t       output;
+      bool           outputReady;
 
-      execLaneT(){
+      execWrLaneT(){
          ttl            = 0;
+         wr             = false;
       }
 
    };
 
-   struct execUnitT{
-      execLaneT      *lanes;
+   struct execWrUnitT{
+      execWrLaneT    *lanes;
       int            numLanes;
       int            latency;
 
-      execUnitT(){
+      execWrUnitT(){
          lanes          = NULL;
          numLanes       = 0;
          latency        = 0;
@@ -205,7 +220,7 @@ class sim_ooo{
          ASSERT( numLanes > 0, "Unsupported number of lanes (=%d)", numLanes );
          this->numLanes += numLanes;
          this->latency   = latency;
-         lanes           = (execLaneT*)realloc(lanes, this->numLanes * sizeof(execLaneT));
+         lanes           = (execWrLaneT*)realloc(lanes, this->numLanes * sizeof(execWrLaneT));
       }
    };
 
@@ -218,7 +233,8 @@ class sim_ooo{
 
    gprFileT       gprFile[NUM_GP_REGISTERS];
    fpFileT        fpFile[NUM_FP_REGISTERS];
-   execUnitT      execFp[EXEC_UNIT_TOTAL];
+   execWrUnitT    execFp[EXEC_UNIT_TOTAL];
+   execWrUnitT    WrFp[EXEC_UNIT_TOTAL];
 
    unsigned       data_memory_size;
    unsigned       dataMemSize;
@@ -235,7 +251,7 @@ class sim_ooo{
 
    //----------------------------------------------------------------------------//
 
-   Fifo <robT> *robP;
+   Fifo <robT*> rob;
    public:
 
    /* Instantiates the simulator

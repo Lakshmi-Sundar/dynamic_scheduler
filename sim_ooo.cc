@@ -6,7 +6,8 @@ using namespace std;
 static const char *stage_names[NUM_STAGES] = {"ISSUE", "EXE", "WR", "COMMIT"};
 static const char *instr_names[NUM_OPCODES] = {"LW", "SW", "ADD", "ADDI", "SUB", "SUBI", "XOR", "XORI", "OR", "ORI", "AND", "ANDI", "MULT", "DIV", "BEQZ", "BNEZ", "BLTZ", "BGTZ", "BLEZ", "BGEZ", "JUMP", "EOP", "LWS", "SWS", "ADDS", "SUBS", "MULTS", "DIVS"};
 static const char *res_station_names[5]={"Int", "Add", "Mult", "Load"};
-map <string, opcode_t> opcode_2str = { {"LW", LW}, {"SW", SW}, {"ADD", ADD}, {"ADDI", ADDI}, {"SUB", SUB}, {"SUBI", SUBI}, {"XOR", XOR}, {"XORI", XORI}, {"OR", OR}, {"ORI", ORI}, {"AND", AND}, {"ANDI", ANDI}, {"MULT", MULT}, {"DIV", DIV}, {"BEQZ", BEQZ}, {"BNEZ", BNEZ}, {"BLTZ", BLTZ}, {"BGTZ", BGTZ}, {"BLEZ", BLEZ}, {"BGEZ", BGEZ}, {"JUMP", JUMP}, {"EOP", EOP}, {"NOP", NOP}, {"LWS", LWS}, {"SWS", SWS}, {"ADDS", ADDS}, {"SUBS", SUBS}, {"MULTS", MULTS}, {"DIVS", DIVS}};
+
+map <string, opcode_t> opcode_2str = { {"LW", LW}, {"SW", SW}, {"ADD", ADD}, {"ADDI", ADDI}, {"SUB", SUB}, {"SUBI", SUBI}, {"XOR", XOR}, {"XORI", XORI}, {"OR", OR}, {"ORI", ORI}, {"AND", AND}, {"ANDI", ANDI}, {"MULT", MULT}, {"DIV", DIV}, {"BEQZ", BEQZ}, {"BNEZ", BNEZ}, {"BLTZ", BLTZ}, {"BGTZ", BGTZ}, {"BLEZ", BLEZ}, {"BGEZ", BGEZ}, {"JUMP", JUMP}, {"EOP", EOP}, {"LWS", LWS}, {"SWS", SWS}, {"ADDS", ADDS}, {"SUBS", SUBS}, {"MULTS", MULTS}, {"DIVS", DIVS}};
 
 //------------------------------------convert functions begin--------------------------------------------------------------//
 /* convert a float into an unsigned */
@@ -49,7 +50,7 @@ sim_ooo::sim_ooo(unsigned mem_size,
    robSize                = rob_size;
    issueWidth             = max_issue;
 
-   resStSize              = new int[RS_TOTAL];
+   resStSize              = new unsigned[RS_TOTAL];
    resStSize[INTEGER_RS]  = num_int_res_stations;
    resStSize[ADD_RS]      = num_add_res_stations;
    resStSize[MULT_RS]     = num_mul_res_stations;
@@ -57,7 +58,6 @@ sim_ooo::sim_ooo(unsigned mem_size,
 
    //Allocating issue queue, ROB, reservation stations
 	data_memory            = new unsigned char[data_memory_size];
-   issueQ                 = new instructT[max_issue];
    rob                    = Fifo<robT*>( rob_size );
 
    reset();
@@ -93,7 +93,7 @@ void sim_ooo::fetch(){
       exe_unit_t unit        = opcodeToExUnit(instruct.opcode);
 
       // Assert for overflown reservation station
-      ASSERT(resStation[unit].size() <= resStSize[unit] , "Illegal resStation size found (%d > %d)", resStation[unit].size(), resStSize[unit]);
+      ASSERT(resStation[unit].size() <= resStSize[unit] , "Illegal resStation size found (%lu > %u)", resStation[unit].size(), resStSize[unit]);
 
       //Checking if reservation station is not full 
       if (resStation[unit].size() != resStSize[unit]) {
@@ -128,11 +128,12 @@ void sim_ooo::fetch(){
          PC                     = PC + 4;
 
          //update TAG at register File with ROB entry if destination exists
-         if(instruct.dstValid)
+         if(instruct.dstValid){
             if(instruct.dstF)
                set_fp_reg_tag(instruct.dst, robIndex, true); 
             else
                set_int_reg_tag(instruct.dst, robIndex, true); 
+         }
 
          break;
       }
@@ -146,16 +147,16 @@ void sim_ooo::dispatch(){
    //To iterate through reservation station units
    for(int unit = 0; unit < RS_TOTAL; unit++) {
       //To iterate through individual units
-      for(int payIndex = 0; payIndex < resStation[unit].size(); payIndex++) {
+      for(unsigned payIndex = 0; payIndex < resStation[unit].size(); payIndex++) {
          //Checking if both operands are ready, hence instruction is ready and it is not in execute stage
          resStationT* resP = resStation[unit][payIndex];
 
-         bool instReady    = true;
-         bool bypassReady  = false;
-         bool bypassValue  = UNDEFINED;
-         bool is_store     = resP->dInstP->is_store;
-         bool is_load      = resP->dInstP->is_load;
-         uint32_t addr     = agen(*(resP->dInstP));
+         bool instReady        = true;
+         bool bypassReady      = false;
+         uint32_t bypassValue  = UNDEFINED;
+         bool is_store         = resP->dInstP->is_store;
+         bool is_load          = resP->dInstP->is_load;
+         uint32_t addr         = agen(*(resP->dInstP));
 
          if( is_load ){
             instReady      = isConflictingStore(resP->tagD, addr, bypassReady, bypassValue);
@@ -177,8 +178,8 @@ void sim_ooo::dispatch(){
                   execFp[execUnit].lanes[laneId].ttl      = ttl + 1;
                   
                   // Setting up outputs
-                  execFp[execUnit].outputReady            = is_load && bypassReady;
-                  execFp[execUnit].output                 = (is_load && bypassReady) ? bypassValue : UNDEFINED;
+                  execFp[execUnit].lanes[laneId].outputReady = is_load && bypassReady;
+                  execFp[execUnit].lanes[laneId].output      = (is_load && bypassReady) ? bypassValue : UNDEFINED;
                   if( is_store ){
                      // ROB is acting as a store buffer
                      // Update addr in ROB
@@ -425,7 +426,7 @@ void sim_ooo::run(unsigned cycles){
 
 //reset the state of the sim_oooulator
 void sim_ooo::reset(){
-   for(unsigned i = 0; i < this->dataMemSize; i++) {
+   for(unsigned i = 0; i < data_memory_size; i++) {
       data_memory[i]   = UNDEFINED; 
    }
 
@@ -464,15 +465,6 @@ void sim_ooo::squash(){
 
 bool sim_ooo::regBusy(uint32_t regNo, bool isF) {
    return isF ? fpFile[regNo].busy : gprFile[regNo].busy;
-}
-
-bool sim_ooo::intBranch(){
-   for(int i = 0; i < execFp[INTEGER].numLanes; i++) {
-      if( execFp[INTEGER].lanes[i].instruct.is_branch ) {
-         return true;
-      }
-   }
-   return false;
 }
 
 exe_unit_t sim_ooo::opcodeToExUnit(opcode_t opcode){
@@ -698,13 +690,13 @@ void sim_ooo::print_memory(unsigned start_address, unsigned end_address){
 
 void sim_ooo::write_memory(unsigned address, unsigned value){
    ASSERT( address % 4 == 0, "Unaligned memory access found at address %x", address ); 
-   ASSERT ( (address >= 0) && (address < dataMemSize), "Out of bounds memory accessed: Seg Fault!!!!" );
+   ASSERT ( (address >= 0) && (address < data_memory_size), "Out of bounds memory accessed: Seg Fault!!!!" );
 	unsigned2char(value,data_memory+address);
 }
 
 unsigned sim_ooo::read_memory(unsigned address){
    ASSERT( address % 4 == 0, "Unaligned memory access found at address %x", address ); 
-   ASSERT ( (address >= 0) && (address < dataMemSize), "Out of bounds memory accessed: Seg Fault!!!!" );
+   ASSERT ( (address >= 0) && (address < data_memory_size), "Out of bounds memory accessed: Seg Fault!!!!" );
    return char2unsigned(data_memory+address);
 }
 //---------------------------READ AND WRITE MEMORY FUNCTIONS END----------------------------------------//
@@ -778,6 +770,10 @@ template <class T> Fifo<T>::Fifo( uint32_t size ){
    this->count             = 0;
    this->size              = size;
    this->array             = new T[ size ];
+}
+
+template <class T> Fifo<T>::Fifo(){
+   Fifo(0);
 }
 
 template <class T> Fifo<T>::~Fifo(){

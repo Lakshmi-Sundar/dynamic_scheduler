@@ -58,7 +58,7 @@ sim_ooo::sim_ooo(unsigned mem_size,
 
    //Allocating issue queue, ROB, reservation stations
 	data_memory            = new unsigned char[data_memory_size];
-   rob                    = Fifo<robT*>( rob_size );
+   rob                    = Fifo<robT>( rob_size );
 
    reset();
 }
@@ -97,14 +97,16 @@ void sim_ooo::fetch(){
 
       //Checking if reservation station is not full 
       if (resStation[unit].size() != resStSize[unit]) {
-         robT* robEntryP        = new robT(&instruct);
-         robEntryP->busy        = true;
-         if(instruct.is_store)
-            robEntryP->memLatency = execFp[MEMORY].latency;
-         uint32_t robIndex      = rob.push(robEntryP);
+         robT robEntry(&instruct);
+         robEntry.busy          = true;
 
-         resStationT* resP      = new resStationT(robEntryP->dInstP);
-         resP->pcRs             = PC;
+         //FIXMEVJ
+         //if(instruct.is_store)
+         //   robEntry.memLatency = execFp[MEMORY].latency;
+
+         uint32_t robIndex      = rob.push(robEntry);
+
+         resStationT* resP      = new resStationT(robEntry.dInstP);
          resP->vj               = (instruct.src1Valid) ? regRead(instruct.src1, instruct.src1F) : UNDEFINED;
          resP->vk               = (instruct.src2Valid) ? regRead(instruct.src2, instruct.src2F) : UNDEFINED;
          resP->qj               = (instruct.src1Valid) ? regTag(instruct.src1, instruct.src1F)  : UNDEFINED;
@@ -183,7 +185,7 @@ void sim_ooo::dispatch(){
                   if( is_store ){
                      // ROB is acting as a store buffer
                      // Update addr in ROB
-                     rob.peekIndex( resP->tagD )->dest    = addr;
+                     rob.peekIndex( resP->tagD )->dest       = addr;
                   }
                   break;
                }
@@ -222,6 +224,8 @@ bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassR
          //returns the most recent conflict entry
          return conflict;
    }
+   ASSERT(true, "tag == loadTag not found!");
+   return conflict;
 }
 
 //-------------------------------issue stage begin-----------------------------------------------------------//
@@ -266,10 +270,13 @@ uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, bool& misPred){
    bool src1F      = dInstP->src1F;
    bool src2F      = dInstP->src2F;
    opcode_t opcode = dInstP->opcode;
+   uint32_t imm    = dInstP->imm;
+   uint32_t npc    = dInstP->pc + 4;
 
    switch(opcode) {
-      case LW ... SWS:
-         return read_memory (resP->addr);
+      case LW ... SW:
+      case LWS ... SWS:
+         return read_memory (imm);
          break;
 
       case ADD ... DIV:
@@ -278,45 +285,44 @@ uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, bool& misPred){
          break;
 
       case ADDI ... ANDI:
-         return alu(regRead(src1, src1F), instruct.imm, src1F, false, opcode);
+         return alu(regRead(src1, src1F), imm, src1F, false, opcode);
          break;
 
       case BLTZ:
          misPred = regRead(src1, src1F) < 0;
-         return alu(npc, instruct.imm, false, false, opcode);
+         return alu(npc, imm, false, false, opcode);
          break;
 
       case BNEZ:
          misPred = regRead(src1, src1F) != 0;
-         return alu(npc, instruct.imm, false, false, opcode);
+         return alu(npc, imm, false, false, opcode);
          break;
 
       case BEQZ:
          misPred = regRead(src1, src1F) == 0;
-         return alu(npc, instruct.imm, false, false, opcode);
+         return alu(npc, imm, false, false, opcode);
          break;
 
       case BGTZ:
          misPred = regRead(src1, src1F) > 0;
-         return alu(npc, instruct.imm, false, false, opcode);
+         return alu(npc, imm, false, false, opcode);
          break;
 
       case BGEZ:
          misPred = regRead(src1, src1F) >= 0;
-         return alu(npc, instruct.imm, false, false, opcode);
+         return alu(npc, imm, false, false, opcode);
          break;
 
       case BLEZ:
          misPred = regRead(src1, src1F) <= 0;
-         return alu(npc, instruct.imm, false, false, opcode);
+         return alu(npc, imm, false, false, opcode);
          break;
 
       case JUMP:
          misPred = true;
-         return alu(npc, instruct.imm, false, false, opcode);
+         return alu(npc, imm, false, false, opcode);
          break;
 
-      case NOP:
       case EOP:
          break;
 
@@ -340,20 +346,20 @@ void sim_ooo::writeResult(){
             res_station_t resDelUnit;
             //wake up all res stations by searching for tagD
             for( int unit = 0; unit < RS_TOTAL; unit++ ){
-               for(int k = 0; k < resStation[unit].size(); k++) {
+               for(uint32_t k = 0; k < resStation[unit].size(); k++) {
 
-                  if( resP->tagD == resStation[unit][k].tagD ){
+                  if( resP->tagD == resStation[unit][k]->tagD ){
                      resDelIndex      = k;
-                     resDelUnit       = unit;
+                     resDelUnit       = (res_station_t)unit;
                   }
 
-                  if(resStation[unit][k].qj == resP->tagD) {
-                     resStation[unit][k].vj = laneP->output;
-                     resStation[unit][k].qj = UNDEFINED;
+                  if(resStation[unit][k]->qj == resP->tagD) {
+                     resStation[unit][k]->vj = laneP->output;
+                     resStation[unit][k]->qj = UNDEFINED;
                   }
-                  if(resStation[unit][k].qk == resP->tagD) {
-                     resStation[unit][k].vk = laneP->output;
-                     resStation[unit][k].qk = UNDEFINED;
+                  if(resStation[unit][k]->qk == resP->tagD) {
+                     resStation[unit][k]->vk = laneP->output;
+                     resStation[unit][k]->qk = UNDEFINED;
                   }
                }
             }
@@ -364,7 +370,7 @@ void sim_ooo::writeResult(){
             //remove entry from res station
             ASSERT( resDelIndex != -1, "resDelIndex == -1" );
             delete resStation[resDelUnit][resDelUnit];
-            resStation[resDelUnit].erase( resDelIndex );
+            resStation[resDelUnit].erase( resStation[resDelUnit].begin() + resDelIndex );
          }
       }
    }
@@ -373,7 +379,7 @@ void sim_ooo::writeResult(){
 void sim_ooo::commit(){
    for(int i = 0; i < issueWidth && !rob.isEmpty(); i++){
       robT* head       = rob.peekHead();
-      uint32_t headTag = rob.getHeadIndex();
+      int headTag      = rob.getHeadIndex();
       if(head->ready){
          //--------------- STORE ---------------
          if(head->dInstP->is_store) {
@@ -406,7 +412,7 @@ void sim_ooo::commit(){
 
          // Commit
          bool underflow;
-         delete rob.pop(underflow);
+         rob.pop(underflow);
          ASSERT(!underflow, "ROB underflown");
 
          //--------------- BRANCH --------------
@@ -471,7 +477,7 @@ exe_unit_t sim_ooo::opcodeToExUnit(opcode_t opcode){
    exe_unit_t unit;
    switch( opcode ){
       case ADD ... AND:
-      case BEQZ ... SWS:
+      case BEQZ ... EOP:
          unit = INTEGER;
          break;
 
@@ -521,8 +527,8 @@ unsigned sim_ooo::aluF (unsigned _value1, unsigned _value2, bool value1F, bool v
 
    switch( opcode ){
       case ADD:
-      case BEQZ ... ADDI:
-      case JUMP ... ADDS:
+      case ADDI:
+      case BEQZ ... ADDS:
          output      = value1 + value2;
          break;
 
@@ -575,8 +581,8 @@ unsigned sim_ooo::alu (unsigned _value1, unsigned _value2, bool value1F, bool va
 
    switch( opcode ){
       case ADD:
-      case BEQZ ... ADDI:
-      case JUMP ... ADDS:
+      case ADDI:
+      case BEQZ ... ADDS:
          output      = value1 + value2;
          break;
 
@@ -636,7 +642,7 @@ int sim_ooo::get_int_register(unsigned reg){
 	return gprFile[reg].value; 
 }
 
-//TODO: Check if this is necessary
+//TODOVJ: Check if this is necessary
 void sim_ooo::set_int_register(unsigned reg, int value){
    gprFile[reg].value = value;
 }
@@ -645,10 +651,11 @@ float sim_ooo::get_fp_register(unsigned reg){
 	return fpFile[reg].value;
 }
 
-//TODO: Check if this is necessary
+//TODOVJ: Check if this is necessary
 void sim_ooo::set_fp_register(unsigned reg, float value){
    fpFile[reg].value = value;
 }
+
 void sim_ooo::set_fp_reg_tag(unsigned reg, int tag, bool busy){
    fpFile[reg].tag   = tag;
    fpFile[reg].busy  = busy;
@@ -764,12 +771,14 @@ unsigned sim_ooo::get_clock_cycles(){
 }
 
 //-------------------------------- Fifo FUNCS BEGIN -------------------------------
-template <class T> Fifo<T>::Fifo( uint32_t size ){
-   this->head              = 0;
-   this->tail              = 0;
-   this->count             = 0;
-   this->size              = size;
-   this->array             = new T[ size ];
+template <class T> Fifo<T>::Fifo( int size ){
+   head              = 0;
+   tail              = 0;
+   count             = 0;
+   size              = size;
+   array             = NULL;
+   if( size > 0 )
+      array          = new T[ size ];
 }
 
 template <class T> Fifo<T>::Fifo(){
@@ -777,13 +786,12 @@ template <class T> Fifo<T>::Fifo(){
 }
 
 template <class T> Fifo<T>::~Fifo(){
-   delete array;
 }
 
 template <class T> uint32_t Fifo<T>::push( T entry ){
    // Push only if space is available
    // Overflow check condition
-   uint32_t push_index = -1;
+   int push_index = -1;
    if( count < size ){
       // Place data on tail and increment tail and count
       array[ tail ]        = entry;
@@ -822,7 +830,7 @@ template <class T> T* Fifo<T>::peekHead(){
 
 // n is assumed to be indexed from 0
 // 0 means head, count - 1 means tail
-template <class T> T* Fifo<T>::peekNth( uint32_t n ){
+template <class T> T* Fifo<T>::peekNth( int n ){
    assert( n < count );
    uint32_t index = ( head + n ) % size;
    return &( array[ index ] );
@@ -831,7 +839,7 @@ template <class T> T* Fifo<T>::peekNth( uint32_t n ){
 // Peek a custom physical index
 // NOTE: should be between head and tail
 // TODO: verify
-template <class T> T* Fifo<T>::peekIndex( uint32_t index ){
+template <class T> T* Fifo<T>::peekIndex( int index ){
    assert( index < size );
    // ----- head ---- index ----- tail -----
    // -- index --- tail --------- head -----
@@ -842,15 +850,15 @@ template <class T> T* Fifo<T>::peekIndex( uint32_t index ){
    return &( array[ index ] );
 }
 
-template <class T> uint32_t Fifo<T>::getHeadIndex(){
+template <class T> int Fifo<T>::getHeadIndex(){
    return head;
 }
 
-template <class T> uint32_t Fifo<T>::getTailIndex(){
+template <class T> int Fifo<T>::getTailIndex(){
    return tail;
 }
 
-template <class T> uint32_t Fifo<T>::getCount(){
+template <class T> int Fifo<T>::getCount(){
    return count;
 }
 
@@ -861,16 +869,16 @@ template <class T> void Fifo<T>::popAll(){
 
 // Phase: true if head == tail is to be considered full
 //        false if head == tail is empty
-template <class T> uint32_t Fifo<T>::getCountHeadTail( uint32_t head, uint32_t tail, bool phase){
+template <class T> int Fifo<T>::getCountHeadTail( int head, int tail, bool phase){
    uint32_t count = ( tail > head ) ? ( tail - head ) : ( size - head + tail );
    return ( head == tail ) ? ( phase ? size : 0 ) : count;
 }
 
 // Phase: true if head == tail is to be considered full
 //        false if head == tail is empty
-template <class T> void Fifo<T>::moveHead( uint32_t head, bool phase, uint32_t count ){
+template <class T> void Fifo<T>::moveHead( int head, bool phase, int count ){
    head           = head % size;
-   uint32_t temp_count = getCountHeadTail( head, tail, phase );
+   int temp_count = getCountHeadTail( head, tail, phase );
 
    // Verify head pointer movement if requested (count != -1)
    assert( ( tail == head && ( count == 0 || count == size ) ) || count == -1 || temp_count == count );
@@ -881,9 +889,9 @@ template <class T> void Fifo<T>::moveHead( uint32_t head, bool phase, uint32_t c
 
 // Phase: true if head == tail is to be considered full
 //        false if head == tail is empty
-template <class T> void Fifo<T>::moveTail( uint32_t tail, bool phase, uint32_t count ){
-   tail                = tail % size;
-   uint32_t temp_count = getCountHeadTail( head, tail, phase );
+template <class T> void Fifo<T>::moveTail( int tail, bool phase, int count ){
+   tail           = tail % size;
+   int temp_count = getCountHeadTail( head, tail, phase );
 
    // Verify tail pointer movement if requested (count != -1)
    assert( ( tail == head && ( count == 0 || count == size ) ) || count == -1 || temp_count == count );
@@ -1035,7 +1043,7 @@ int sim_ooo::parse( const string filename, unsigned base_address ){
          if( unresolved_label_index.find( label ) != unresolved_label_index.end() ){
             // We do have some unresolved instructions..
             vector <int> unresolved_index = unresolved_label_index[label];
-            for( int index = 0; index < unresolved_index.size(); index++ ){
+            for( unsigned index = 0; index < unresolved_index.size(); index++ ){
                // Disambiguate all previous encounters
                int inst_index              = unresolved_index[index];
                instMemory[inst_index]->imm = indexToOffset( line_num, inst_index );
@@ -1132,7 +1140,6 @@ int sim_ooo::parse( const string filename, unsigned base_address ){
             break;
 
          case EOP:
-         case NOP:
             break;
 
          default:

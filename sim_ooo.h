@@ -29,7 +29,7 @@ using namespace std;
       abort(); \
    }
 
-typedef enum {LW, SW, ADD, ADDI, SUB, SUBI, XOR, XORI, OR, ORI, AND, ANDI, MULT, DIV, BEQZ, BNEZ, BLTZ, BGTZ, BLEZ, BGEZ, JUMP, EOP, LWS, SWS, ADDS, SUBS, MULTS, DIVS} opcode_t;
+typedef enum {LW, SW, ADD, SUB, XOR, OR, AND, MULT, DIV, ADDI, SUBI, XORI, ORI, ANDI, BEQZ, BNEZ, BLTZ, BGTZ, BLEZ, BGEZ, JUMP, EOP, LWS, SWS, ADDS, SUBS, MULTS, DIVS} opcode_t;
 
 typedef enum {INTEGER_RS, ADD_RS, MULT_RS, LOAD_B, RS_TOTAL} res_station_t;
 
@@ -37,7 +37,7 @@ typedef enum {INTEGER, ADDER, MULTIPLIER, DIVIDER, MEMORY, EX_TOTAL} exe_unit_t;
 
 typedef enum{ISSUE, EXECUTE, WRITE_RESULT, COMMIT} stage_t;
 
-const string opcode_str[] = {"LW", "SW", "ADD", "ADDI", "SUB", "SUBI", "XOR", "XORI", "OR", "ORI", "AND", "ANDI", "MULT", "DIV", "BEQZ", "BNEZ", "BLTZ", "BGTZ", "BLEZ", "BGEZ", "JUMP", "EOP", "LWS", "SWS", "ADDS", "SUBS", "MULTS", "DIVS"};
+const string opcode_str[] = {"LW", "SW", "ADD", "SUB", "XOR", "OR", "AND", "MULT", "DIV", "ADDI", "SUBI", "XORI", "ORI", "ANDI", "BEQZ", "BNEZ", "BLTZ", "BGTZ", "BLEZ", "BGEZ", "JUMP", "EOP", "LWS", "SWS", "ADDS", "SUBS", "MULTS", "DIVS"};
 
 
 //-------------------------------------------------------------------------------//
@@ -46,6 +46,7 @@ typedef struct instructT* instructPT;
 
 struct instructT{
    opcode_t           opcode;
+   uint32_t           pc;
    uint32_t           dst;
    uint32_t           src1;
    uint32_t           src2;
@@ -146,7 +147,6 @@ struct fpFileT{
 //Data structure for Reservation Station
 struct resStationT{
    dynInstructPT   dInstP;
-   unsigned        pcRs;
    unsigned        vj;
    bool            vjR;
    unsigned        vk;
@@ -162,7 +162,6 @@ struct resStationT{
       dInstP     = dynInstP;
       vjR        = true;
       vkR        = true;
-      pcRs       = UNDEFINED;
       vj         = UNDEFINED;
       vk         = UNDEFINED;
       qj         = UNDEFINED;
@@ -227,6 +226,10 @@ struct robT{
       value      = UNDEFINED;
       memLatency = 0;
    }
+
+   robT(){
+   }
+
    ~robT(){
       delete dInstP;
    }
@@ -236,13 +239,13 @@ template <typename T>
 class Fifo {
    private:
       T*        array;
-      uint32_t  head;
-      uint32_t  tail;
-      uint32_t  count;
-      uint32_t  size;
+      int       head;
+      int       tail;
+      int       count;
+      int       size;
 
    public:
-      Fifo( uint32_t size );
+      Fifo( int size );
       Fifo();
       ~Fifo();
 
@@ -251,19 +254,19 @@ class Fifo {
       T* peekHead();
       // n is assumed to be indexed from 0
       // 0 means head, count - 1 means tail
-      T* peekNth( uint32_t n );
+      T* peekNth( int n );
       // Peek a custom physical index
       // NOTE: should be between head and tail
-      T* peekIndex( uint32_t index );
-      uint32_t getHeadIndex();
-      uint32_t getTailIndex();
-      uint32_t getCount();
+      T* peekIndex( int index );
+      int getHeadIndex();
+      int getTailIndex();
+      int      getCount();
       void popAll();
       // Phase: true if head == tail is to be considered full (head moving against tail)
       //        false if head == tail is empty (head moving towards tail)
-      uint32_t getCountHeadTail( uint32_t head, uint32_t tail, bool phase=false );
-      void moveHead( uint32_t head, bool phase=false, uint32_t count=-1 );
-      void moveTail( uint32_t tail, bool phase=false, uint32_t count=-1 );
+      int getCountHeadTail( int head, int tail, bool phase=false );
+      void moveHead( int head, bool phase=false, int count=-1 );
+      void moveTail( int tail, bool phase=false, int count=-1 );
       bool isFull();
       bool isEmpty();
       uint32_t getSize();
@@ -299,7 +302,7 @@ class sim_ooo{
 
    //----------------------------------------------------------------------------//
 
-   Fifo<robT*> rob;
+   Fifo<robT> rob;
    public:
 
    /* Instantiates the simulator
@@ -341,13 +344,13 @@ class sim_ooo{
    int get_int_register(unsigned reg);
 
    //set the value of the given integer general purpose register to "value"
-   void set_int_register(unsigned reg, int value, int tag, bool busy);
+   void set_int_register(unsigned reg, int value);
 
    //returns value of the specified floating point general purpose register
    float get_fp_register(unsigned reg);
 
    //set the value of the given floating point general purpose register to "value"
-   void set_fp_register(unsigned reg, float value, int tag, bool busy);
+   void set_fp_register(unsigned reg, float value);
 
    // returns the index of the ROB entry that will write this integer register (UNDEFINED if the value of the register is not pending
    unsigned get_pending_int_register(unsigned reg);
@@ -408,6 +411,12 @@ class sim_ooo{
    unsigned read_memory(unsigned address);
    void set_fp_reg_tag(unsigned reg, int tag, bool busy);
    void set_int_reg_tag(unsigned reg, int tag, bool busy);
+   int indexToOffset( uint32_t line_index, uint32_t pc_index );
+   int labelResolve(string label, 
+         map <string, int>& label_to_linenum,
+         map <string, vector <int> >& unresolved_label_index,
+         int line_num );
+   void getReg( istringstream& buff_iss, uint32_t& reg, bool& regF, bool with_brackets=false );
    int parse( const string filename, unsigned base_address );
 };
 

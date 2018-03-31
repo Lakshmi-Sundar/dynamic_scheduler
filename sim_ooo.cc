@@ -67,9 +67,7 @@ sim_ooo::~sim_ooo(){
 }
 
 void sim_ooo::init_exec_unit(exe_unit_t exec_unit, unsigned latency, unsigned instances){
-   //TODO: Check the latency and how it is implemented
    execFp[exec_unit].init(instances, latency);
-   WrFp[exec_unit].init(instances, latency);
 }
 
 void sim_ooo::load_program(const char *filename, unsigned base_address){
@@ -86,11 +84,6 @@ instructT sim_ooo::fetchInstruction ( unsigned pc ) {
    return instruct;
 }
 
-//TODO: Check for the following
-//1. Structural hazards taken care before populating ROB and RS?
-//2. ROB Updated?
-//3. RS Updated with all entries?
-//4. Register file updated with Tag and set busy?
 // The following function is for IF + ID + RR
 void sim_ooo::fetch(){
     for (int j = 0; j < issueWidth && rob.isFull(); j++){
@@ -104,9 +97,10 @@ void sim_ooo::fetch(){
 
       //Checking if reservation station is not full 
       if (resStation[unit].size() != resStSize[unit]) {
-         //TODO: Check for correctness
          robT* robEntryP        = new robT(&instruct);
          robEntryP->busy        = true;
+         if(instruct.is_store)
+            robEntryP->memLatency = execFp[MEMORY].latency;
          uint32_t robIndex      = rob.push(robEntryP);
 
          resStationT* resP      = new resStationT(robEntryP->dInstP);
@@ -147,13 +141,6 @@ void sim_ooo::fetch(){
    }
 }
 
-//0. Load / Store latency modelling, check for dependent, or pending stores
-//1. Maintain program order while issuing into exec. 
-//2. SWS after LWS need not require LWS Stalling
-//3. If SWS (not ready) before LWS (ready), LWS has to stall.
-//4. WHATEVER IS IN RES STATION HAS ALREADY GONE INTO EXEC UNIT (inExec checks for that)
-//4. Check if EXEC UNITS are FREE and if source values are available.
-//5. Push into Exec Unit when both conditions are satisfied.
 // The following function is for IS
 void sim_ooo::dispatch(){
    //To iterate through reservation station units
@@ -243,13 +230,6 @@ void sim_ooo::issue() {
 }
 //-------------------------------issue stage end-------------------------------------------------------------//
 //-------------------------------------------------------------execute stage---------------------------------//
-//1. Model latency of the functional units.
-//Do ttl--, as long as ttl != 1, keep decrementing and keep the instruction in exec and res station. 
-//as ttl == 1, move it to WR, meaning remove it from Res Station, and exec unit (set isExec/ttl=0 false).
-//When there is a LWS, check if there is a dependent store, pass the value to it. (isDep)
-//2. Check for LOAD BYPASS and latency is 1. Else latency is Mem Latency.
-//3. Take bypass from store, if there is a dependent store. 
-//4. Update memory address of load/store.
 void sim_ooo::execute(){
    //iterating through execution units
    for(int i = 0; i < EX_TOTAL; i++){
@@ -267,7 +247,7 @@ void sim_ooo::execute(){
             if( laneP->ttl == 1 ) {
                // It's time to execute!!
                if( !laneP->outputReady )
-                  laneP->output           = aluGetOutput(resP->dInstP);
+                  laneP->output           = aluGetOutput(resP->dInstP, rob.peekIndex( resP->tagD )->misPred);
                laneP->outputReady         = true;
 
                // vk has to be updated for all loads
@@ -331,7 +311,7 @@ uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, bool& misPred){
          break;
 
       case JUMP:
-         misPred = 1;
+         misPred = true;
          return alu(npc, instruct.imm, false, false, opcode);
          break;
 
@@ -347,14 +327,93 @@ uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, bool& misPred){
    return UNDEFINED;
 }
 //-----------------------------------WRITE RESULT STAGE MOSTLY---------------------------------------------//
-//TODO:
-//1. Update ROB
-//2. Wake up RS
 void sim_ooo::writeResult(){
    for(int i = 0; i < EX_TOTAL; i++){
-      for(int j = 0; j < wrFp[i].numLanes; j++){
-         resStationT* resP       = wrFp[i].lanes[j].payloadP;
-         if(wrFp[i].lanes[j].wr)
+      for(int j = 0; j < execFp[i].numLanes; j++){
+         if(execFp[i].lanes[j].ttl == 1){
+            resStationT* resP         = execFp[i].lanes[j].payloadP;
+            execWrLaneT* laneP        = &(execFp[i].lanes[j]);
+            ASSERT( laneP->outputReady, "At WriteResult, output not ready!" );
+
+            int resDelIndex           = -1;
+            res_station_t resDelUnit;
+            //wake up all res stations by searching for tagD
+            for( int unit = 0; unit < RS_TOTAL; unit++ ){
+               for(int k = 0; k < resStation[unit].size(); k++) {
+
+                  if( resP->tagD == resStation[unit][k].tagD ){
+                     resDelIndex      = k;
+                     resDelUnit       = unit;
+                  }
+
+                  if(resStation[unit][k].qj == resP->tagD) {
+                     resStation[unit][k].vj = laneP->output;
+                     resStation[unit][k].qj = UNDEFINED;
+                  }
+                  if(resStation[unit][k].qk == resP->tagD) {
+                     resStation[unit][k].vk = laneP->output;
+                     resStation[unit][k].qk = UNDEFINED;
+                  }
+               }
+            }
+            // updating ROB
+            rob.peekIndex( resP->tagD )->value = laneP->output;
+            rob.peekIndex( resP->tagD )->ready = true;
+
+            //remove entry from res station
+            ASSERT( resDelIndex != -1, "resDelIndex == -1" );
+            delete resStation[resDelUnit][resDelUnit];
+            resStation[resDelUnit].erase( resDelIndex );
+         }
+      }
+   }
+}
+
+void sim_ooo::commit(){
+   for(int i = 0; i < issueWidth && !rob.isEmpty(); i++){
+      robT* head       = rob.peekHead();
+      uint32_t headTag = rob.getHeadIndex();
+      if(head->ready){
+         //--------------- STORE ---------------
+         if(head->dInstP->is_store) {
+            if(head->memLatency != 0){
+               head->memLatency--;
+               break;
+            }
+            else
+               write_memory(head->value, head->dest);
+         }
+
+         bool gSquash = head->dInstP->is_branch && head->misPred;
+         uint32_t npc = head->value;
+       
+         // Update RF
+         if(head->dInstP->dstValid){
+            if(head->dInstP->dstF){
+               fpFile[head->dInstP->dst].value    = head->value;
+               // Clear busy if the latest tag in RF is being committed
+               if( headTag == fpFile[head->dInstP->dst].tag )
+                  fpFile[head->dInstP->dst].busy  = false; 
+            } 
+            else {
+               gprFile[head->dInstP->dst].value   = head->value;
+               // Clear busy if the latest tag in RF is being committed
+               if( headTag == gprFile[head->dInstP->dst].tag )
+                  gprFile[head->dInstP->dst].busy = false; 
+            }
+         }
+
+         // Commit
+         bool underflow;
+         delete rob.pop(underflow);
+         ASSERT(!underflow, "ROB underflown");
+
+         //--------------- BRANCH --------------
+         if(gSquash){
+            PC = npc;
+            squash();
+            break;
+         }
       }
    }
 }
@@ -367,33 +426,38 @@ void sim_ooo::run(unsigned cycles){
 //reset the state of the sim_oooulator
 void sim_ooo::reset(){
    for(unsigned i = 0; i < this->dataMemSize; i++) {
-      this->data_memory[i] = UNDEFINED; 
-   }
-
-   //initializing Instruction Array to UNDEFINED
-   for(int i = 0; i < NUM_STAGES; i++) {
-      this->instrArray[i].stall();
+      data_memory[i]   = UNDEFINED; 
    }
 
    //initializing GPRs to UNDEFINED
    for(int i = 0; i < NUM_GP_REGISTERS; i++) {
-      this->gprFile[i].value = UNDEFINED;
-      this->gprFile[i].tag   = UNDEFINED;
-      this->gprFile[i].busy  = false;
+      gprFile[i].value = UNDEFINED;
    }
 
    //initializing FP registers to UNDEFINED
    for(int i = 0; i < NUM_FP_REGISTERS; i++) {
-      this->fpFile[i].value = UNDEFINED;
-      this->fpFile[i].tag   = UNDEFINED;
-      this->fpFile[i].busy  = false;
+      fpFile[i].value  = UNDEFINED;
    }
+   // Squash/Flush the pipeline
+   squash();
+}
+
+void sim_ooo::squash(){
    //Clearing Res Station
    for(int i = 0; i < RS_TOTAL; i++){
       resStation[i].clear();
    }
    //Clearing ROB
    rob.popAll();
+
+   // Flash clear busy bits
+   for(int i = 0; i < NUM_FP_REGISTERS; i++) {
+      fpFile[i].busy  = false;
+   }
+
+   for(int i = 0; i < NUM_GP_REGISTERS; i++) {
+      gprFile[i].busy = false;
+   }
 }
 
 //--------------------------------------- IMPORTANT FUNCTIONS ---------------------------------------------//

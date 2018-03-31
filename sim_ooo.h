@@ -44,9 +44,11 @@ class sim_ooo{
       dynInstructPT   dInstP;
       bool            ready;
       bool            busy;
+      bool            misPred;
       unsigned        dest;
       unsigned        value;
       uint32_t        memLatency;
+
 
       robT(instructPT instructP){
          dInstP     = new dynInstructT(instructP);
@@ -55,6 +57,9 @@ class sim_ooo{
          dest       = dInstP->dst;
          value      = UNDEFINED;
          memLatency = 0;
+      }
+      ~robT(){
+         delete dInstP;
       }
    }
 

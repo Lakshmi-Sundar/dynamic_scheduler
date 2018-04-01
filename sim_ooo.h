@@ -67,23 +67,24 @@ struct instructT{
       nop();
    }
 
-   instructT( instructPT input ){
-      opcode     = input->opcode; 
-      dst        = input->dst; 
-      src1       = input->src1; 
-      src2       = input->src2; 
-      imm        = input->imm; 
-      dstValid   = input->dstValid; 
-      src1Valid  = input->src1Valid;
-      src2Valid  = input->src2Valid;
-      is_stall   = input->is_stall; 
-      is_branch  = input->is_branch;
-      is_taken   = input->is_taken;
-      is_store   = input->is_store;
-      is_load    = input->is_load;
-      dstF       = input->dstF;
-      src1F      = input->src1F;    
-      src2F      = input->src2F;    
+   void copy( instructT input ){
+      opcode     = input.opcode; 
+      pc         = input.pc; 
+      dst        = input.dst; 
+      src1       = input.src1; 
+      src2       = input.src2; 
+      imm        = input.imm; 
+      dstValid   = input.dstValid; 
+      src1Valid  = input.src1Valid;
+      src2Valid  = input.src2Valid;
+      is_stall   = input.is_stall; 
+      is_branch  = input.is_branch;
+      is_taken   = input.is_taken;
+      is_store   = input.is_store;
+      is_load    = input.is_load;
+      dstF       = input.dstF;
+      src1F      = input.src1F;    
+      src2F      = input.src2F;    
    }
 
    void print(){
@@ -122,7 +123,8 @@ struct dynInstructT : public instructT{
    int                t_commit;
    stage_t            state;
 
-   dynInstructT( instructPT input ) : instructT(input){
+   dynInstructT( instructT input ){
+      copy(input);
       t_issue          = UNDEFINED;
       t_execute        = UNDEFINED;
       t_wr             = UNDEFINED;
@@ -155,11 +157,11 @@ struct resStationT{
    int             qk;
    int             tagD;
    int             addr;
+   int             id;
 
    bool            inExec;
 
-   resStationT(dynInstructPT dynInstP){
-      dInstP     = dynInstP;
+   resStationT(){
       vjR        = true;
       vkR        = true;
       vj         = UNDEFINED;
@@ -211,27 +213,21 @@ struct execWrUnitT{
 struct robT{
    dynInstructPT   dInstP;
    bool            ready;
-   bool            busy;
    bool            misPred;
    unsigned        dest;
    unsigned        value;
    uint32_t        memLatency;
 
 
-   robT(instructPT instructP){
-      dInstP     = new dynInstructT(instructP);
+   robT(){
+      dInstP     = NULL;
       ready      = false;
-      busy       = false;
-      dest       = dInstP->dst;
+      dest       = UNDEFINED;
       value      = UNDEFINED;
       memLatency = 0;
    }
 
-   robT(){
-   }
-
    ~robT(){
-      delete dInstP;
    }
 };
 
@@ -271,6 +267,7 @@ class Fifo {
       bool isEmpty();
       uint32_t getSize();
       uint32_t genIndex( uint32_t ith );
+      bool isBusy( int index );
 };
 
 
@@ -396,14 +393,14 @@ class sim_ooo{
    bool isConflictingStore(int loadTag, unsigned memAddress, bool& bypassReady, uint32_t& bypassValue );
    void issue() ;
    void execute();
-   uint32_t aluGetOutput(dynInstructT* dInstP, bool& misPred);
+   uint32_t aluGetOutput(dynInstructT* dInstP, uint32_t addr, bool& misPred);
    void writeResult();
    void commit();
    void squash();
    bool regBusy(uint32_t regNo, bool isF) ;
    exe_unit_t opcodeToExUnit(opcode_t opcode);
    int exLatency(opcode_t opcode) ;
-   uint32_t agen ( instructT instruct) ;
+   uint32_t agen (instructT instruct) ;
    unsigned aluF (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode);
    unsigned alu (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode);
    unsigned regRead(unsigned reg, bool isF);

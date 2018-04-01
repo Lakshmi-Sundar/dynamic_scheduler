@@ -9,6 +9,7 @@ static const char *res_station_names[5]={"Int", "Add", "Mult", "Load"};
 
 map <string, opcode_t> opcode_2str = { {"LW", LW}, {"SW", SW}, {"ADD", ADD}, {"ADDI", ADDI}, {"SUB", SUB}, {"SUBI", SUBI}, {"XOR", XOR}, {"XORI", XORI}, {"OR", OR}, {"ORI", ORI}, {"AND", AND}, {"ANDI", ANDI}, {"MULT", MULT}, {"DIV", DIV}, {"BEQZ", BEQZ}, {"BNEZ", BNEZ}, {"BLTZ", BLTZ}, {"BGTZ", BGTZ}, {"BLEZ", BLEZ}, {"BGEZ", BGEZ}, {"JUMP", JUMP}, {"EOP", EOP}, {"LWS", LWS}, {"SWS", SWS}, {"ADDS", ADDS}, {"SUBS", SUBS}, {"MULTS", MULTS}, {"DIVS", DIVS}};
 
+map <exe_unit_t, res_station_t> ex_2Rs = { {INTEGER, INTEGER_RS}, {ADDER, ADD_RS}, {MULTIPLIER, MULT_RS}, {DIVIDER, MULT_RS}, {MEMORY, LOAD_B} };
 //------------------------------------convert functions begin--------------------------------------------------------------//
 /* convert a float into an unsigned */
 inline unsigned float2unsigned(float value){
@@ -86,27 +87,35 @@ instructT sim_ooo::fetchInstruction ( unsigned pc ) {
 
 // The following function is for IF + ID + RR
 void sim_ooo::fetch(){
-    for (int j = 0; j < issueWidth && rob.isFull(); j++){
+   cout << rob.isFull() << endl;
+    for (int j = 0; j < issueWidth && !rob.isFull(); j++){
       //fetching instruction according to PC
       instructT instruct     = fetchInstruction ( PC );
       //finding the execution unit of the opcode
       exe_unit_t unit        = opcodeToExUnit(instruct.opcode);
+      res_station_t rUnit    = ex_2Rs[unit];
 
       // Assert for overflown reservation station
-      ASSERT(resStation[unit].size() <= resStSize[unit] , "Illegal resStation size found (%lu > %u)", resStation[unit].size(), resStSize[unit]);
+      ASSERT(resStation[rUnit].size() <= resStSize[rUnit] , 
+            "Illegal resStation size found for %s (%lu > %u)", res_station_names[rUnit], resStation[rUnit].size(), resStSize[rUnit]);
 
       //Checking if reservation station is not full 
-      if (resStation[unit].size() != resStSize[unit]) {
-         robT robEntry(&instruct);
-         robEntry.busy          = true;
+      if (resStation[rUnit].size() < resStSize[rUnit]) {
+         instruct.print();
+         robT robEntry;
 
-         //FIXMEVJ
-         //if(instruct.is_store)
-         //   robEntry.memLatency = execFp[MEMORY].latency;
+         dynInstructPT dInstP   = new dynInstructT(instruct);
+         dInstP->state          = ISSUE;
 
+         robEntry.dInstP        = dInstP;
          uint32_t robIndex      = rob.push(robEntry);
 
-         resStationT* resP      = new resStationT(robEntry.dInstP);
+         if(instruct.is_store)
+            robEntry.memLatency = execFp[MEMORY].latency;
+
+         resStationT* resP      = new resStationT();
+
+         resP->dInstP           = dInstP;
          resP->vj               = (instruct.src1Valid) ? regRead(instruct.src1, instruct.src1F) : UNDEFINED;
          resP->vk               = (instruct.src2Valid) ? regRead(instruct.src2, instruct.src2F) : UNDEFINED;
          resP->qj               = (instruct.src1Valid) ? regTag(instruct.src1, instruct.src1F)  : UNDEFINED;
@@ -123,8 +132,18 @@ void sim_ooo::fetch(){
          if( unit == MEMORY )
             resP->addr          = instruct.imm;
 
+         // Get the id
+         int id                 = 0;
+         for( int index = 0; index < resStation[rUnit].size(); index++ ){
+            if( resStation[rUnit][index].id != index ){
+               id               = index;
+               break;
+            }
+         }
+         resP->id               = id;
+
          // Add an entry in reservation station
-         resStation[unit].push_back( resP );
+         resStation[rUnit].push_back( resP );
 
          //incrementing PC only if ROB and RS are not full
          PC                     = PC + 4;
@@ -136,7 +155,10 @@ void sim_ooo::fetch(){
             else
                set_int_reg_tag(instruct.dst, robIndex, true); 
          }
-
+      }
+      else{
+         // Reservation station is full
+         cout << "RSFULL" << endl; 
          break;
       }
       //Break if Branch to create a basic block
@@ -161,7 +183,7 @@ void sim_ooo::dispatch(){
          uint32_t addr         = agen(*(resP->dInstP));
 
          if( is_load ){
-            instReady      = isConflictingStore(resP->tagD, addr, bypassReady, bypassValue);
+            instReady      = !isConflictingStore(resP->tagD, addr, bypassReady, bypassValue);
          } 
 
          if ( !resP->inExec && resP->vjR && resP->vkR && instReady ){
@@ -177,11 +199,15 @@ void sim_ooo::dispatch(){
                   // 3. Remaining takes set cycles
                   uint32_t ttl                            = (is_store ? 1 : ((is_load && bypassReady) ? 1 : execFp[execUnit].latency) );
                   // Adding 1 to model 1 unit latency in Write Result
+                  
                   execFp[execUnit].lanes[laneId].ttl      = ttl + 1;
                   
                   // Setting up outputs
                   execFp[execUnit].lanes[laneId].outputReady = is_load && bypassReady;
                   execFp[execUnit].lanes[laneId].output      = (is_load && bypassReady) ? bypassValue : UNDEFINED;
+                  resP->dInstP->state                        = EXECUTE;
+                  if( is_store || is_load )
+                     resP->addr                              = addr;
                   if( is_store ){
                      // ROB is acting as a store buffer
                      // Update addr in ROB
@@ -252,7 +278,7 @@ void sim_ooo::execute(){
             if( laneP->ttl == 1 ) {
                // It's time to execute!!
                if( !laneP->outputReady )
-                  laneP->output           = aluGetOutput(resP->dInstP, rob.peekIndex( resP->tagD )->misPred);
+                  laneP->output           = aluGetOutput(resP->dInstP, resP->addr, rob.peekIndex( resP->tagD )->misPred);
                laneP->outputReady         = true;
 
                // vk has to be updated for all loads
@@ -264,7 +290,7 @@ void sim_ooo::execute(){
    }
 }
 
-uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, bool& misPred){
+uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, uint32_t addr, bool& misPred){
    uint32_t src1   = dInstP->src1;
    uint32_t src2   = dInstP->src2;
    bool src1F      = dInstP->src1F;
@@ -276,7 +302,7 @@ uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, bool& misPred){
    switch(opcode) {
       case LW ... SW:
       case LWS ... SWS:
-         return read_memory (imm);
+         return read_memory (addr);
          break;
 
       case ADD ... DIV:
@@ -339,6 +365,7 @@ void sim_ooo::writeResult(){
       for(int j = 0; j < execFp[i].numLanes; j++){
          if(execFp[i].lanes[j].ttl == 1){
             resStationT* resP         = execFp[i].lanes[j].payloadP;
+            resP->dInstP->state       = WRITE_RESULT;
             execWrLaneT* laneP        = &(execFp[i].lanes[j]);
             ASSERT( laneP->outputReady, "At WriteResult, output not ready!" );
 
@@ -369,7 +396,6 @@ void sim_ooo::writeResult(){
 
             //remove entry from res station
             ASSERT( resDelIndex != -1, "resDelIndex == -1" );
-            delete resStation[resDelUnit][resDelUnit];
             resStation[resDelUnit].erase( resStation[resDelUnit].begin() + resDelIndex );
          }
       }
@@ -412,7 +438,7 @@ void sim_ooo::commit(){
 
          // Commit
          bool underflow;
-         rob.pop(underflow);
+         delete rob.pop(underflow).dInstP;
          ASSERT(!underflow, "ROB underflown");
 
          //--------------- BRANCH --------------
@@ -428,6 +454,15 @@ void sim_ooo::commit(){
 //---------------------------------------------------------------------------------------------------------//
 
 void sim_ooo::run(unsigned cycles){
+   bool rtc = (cycles == 0);
+   while(cycles-- || rtc) {
+      print_status();
+      commit();
+      writeResult();
+      execute();
+      issue();
+      cycleCount++;
+   }
 }
 
 //reset the state of the sim_oooulator
@@ -477,6 +512,7 @@ exe_unit_t sim_ooo::opcodeToExUnit(opcode_t opcode){
    exe_unit_t unit;
    switch( opcode ){
       case ADD ... AND:
+      case ADDI ... ANDI:
       case BEQZ ... EOP:
          unit = INTEGER;
          break;
@@ -501,6 +537,7 @@ exe_unit_t sim_ooo::opcodeToExUnit(opcode_t opcode){
       case SW:
       case SWS:
          unit = MEMORY;
+         break;
 
       default: 
          ASSERT (false, "Opcode not supported");
@@ -729,10 +766,22 @@ void sim_ooo::print_registers(){
 }
 
 void sim_ooo::print_rob(){
+   unsigned i;
 	cout << "REORDER BUFFER" << endl; 
 	cout << setfill(' ') << setw(5) << "Entry" << setw(6) << "Busy" << setw(7) << "Ready" << setw(12) << "PC" << setw(10) << "State" << setw(6) << "Dest" << setw(12) << "Value" << endl;
-	
-	//fill here
+   for(i = 0; i < robSize; i++){
+      bool busy            = rob.isBusy(i);
+
+      robT* robP           = busy ? rob.peekIndex(i) : NULL;
+      dynInstructPT dInstP = busy ? robP->dInstP : NULL;
+      bool ready           = busy ? busy && (robP->ready) : false;
+
+      if( !busy )
+         cout << setfill(' ') << setw(5) << i+1 << setw(6) << "no" << setw(7) << "no" << setw(12) << "-" << setw(10) << "-" << setw(6) << "-" << setw(12) << "-" << endl;
+      else
+         cout << setfill(' ') << setw(5) << i+1 << setw(6) << (busy ? "yes" : "no") << setw(7) << (ready ? "yes" : "no") << setw(12) << dInstP->pc << hex << "/0x" << setw(10) << stage_names[dInstP->state] << setw(6) << (dInstP->dstValid ? (dInstP->dstF ? "F" : "R") : "-") << setw(12) << robP->value << endl;
+
+   }
 	
 	cout << endl;
 }
@@ -742,8 +791,16 @@ void sim_ooo::print_reservation_stations(){
 	cout  << setfill(' ');
 	cout << setw(7) << "Name" << setw(6) << "Busy" << setw(12) << "PC" << setw(12) << "Vj" << setw(12) << "Vk" << setw(6) << "Qj" << setw(6) << "Qk" << setw(6) << "Dest" << setw(12) << "Address" << endl; 
 	
-	// fill here
-	
+	for( int unit = 0; unit < RS_TOTAL; unit++ ){
+      for( int i = 0; i < resStation[unit].size(); i++ ){
+         resStationT* resP  = resStation[unit][i];
+         for( int j = i; j < resStation[unit][i]->id; j++ ){
+            cout << setw(7) << res_station_names[unit] << setw(6) << "no" << setw(12) << "-" << setw(12) << "-" << setw(12) << "-" << setw(6) << "-" << setw(6) << "-" << setw(6) << "-" << setw(12) << "-" << endl; 
+         }
+         cout << setw(7) << res_station_names[unit] << setw(6) << "no" << setw(12) << resP->dInstP->pc << setw(12) << resP->vj << setw(12) << resP->vk << setw(6) << resP->qj << setw(6) << resP->qk << setw(6) << resP->dest << setw(12) << resP->addr << endl; 
+      }
+   }
+
 	cout << endl;
 }
 
@@ -775,7 +832,7 @@ template <class T> Fifo<T>::Fifo( int size ){
    head              = 0;
    tail              = 0;
    count             = 0;
-   size              = size;
+   this->size        = size;
    array             = NULL;
    if( size > 0 )
       array          = new T[ size ];
@@ -836,17 +893,26 @@ template <class T> T* Fifo<T>::peekNth( int n ){
    return &( array[ index ] );
 }
 
+template <class T> bool Fifo<T>::isBusy( int index ){
+   // ----- head ---- index ----- tail -----
+   // -- index --- tail --------- head -----
+   // ----- tail -------- head ---- index --
+   // ----- tail/head ------------- index --
+   // ----- index -------------tail/head ---
+   bool cond = ((index >= head && index < tail && tail > head)  || 
+         (tail > index && head > tail && head > index)  ||
+         (head > tail && index >= head && index > tail)  || 
+         (tail == head && index >= head && count > 0)   || 
+         (tail == head && head >= index && count > 0) );
+   return cond;
+}
+
 // Peek a custom physical index
 // NOTE: should be between head and tail
 // TODO: verify
 template <class T> T* Fifo<T>::peekIndex( int index ){
    assert( index < size );
-   // ----- head ---- index ----- tail -----
-   // -- index --- tail --------- head -----
-   // ----- tail -------- head ---- index --
-   assert( (index >= head && index <= tail && tail >= head)  || 
-         (tail >= index && head >= tail && head >= index)  ||
-         (head >= tail && index >= head && index >= tail) );
+   assert( isBusy(index) );
    return &( array[ index ] );
 }
 

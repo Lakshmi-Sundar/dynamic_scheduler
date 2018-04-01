@@ -31,7 +31,7 @@ using namespace std;
 
 typedef enum {LW, SW, ADD, SUB, XOR, OR, AND, MULT, DIV, ADDI, SUBI, XORI, ORI, ANDI, BEQZ, BNEZ, BLTZ, BGTZ, BLEZ, BGEZ, JUMP, EOP, LWS, SWS, ADDS, SUBS, MULTS, DIVS} opcode_t;
 
-typedef enum {INTEGER_RS, ADD_RS, MULT_RS, LOAD_B, RS_TOTAL} res_station_t;
+typedef enum {INTEGER_RS, LOAD_B, ADD_RS, MULT_RS, RS_TOTAL} res_station_t;
 
 typedef enum {INTEGER, ADDER, MULTIPLIER, DIVIDER, MEMORY, EX_TOTAL} exe_unit_t;
 
@@ -117,10 +117,10 @@ struct instructT{
 };
 
 struct dynInstructT : public instructT{
-   int                t_issue;
-   int                t_execute;
-   int                t_wr;
-   int                t_commit;
+   unsigned           t_issue;
+   unsigned           t_execute;
+   unsigned           t_wr;
+   unsigned           t_commit;
    stage_t            state;
 
    dynInstructT( instructT input ){
@@ -153,10 +153,10 @@ struct resStationT{
    bool            vjR;
    unsigned        vk;
    bool            vkR;
-   int             qj;
-   int             qk;
-   int             tagD;
-   int             addr;
+   unsigned        qj;
+   unsigned        qk;
+   unsigned        tagD;
+   unsigned        addr;
    int             id;
 
    bool            inExec;
@@ -404,6 +404,7 @@ class sim_ooo{
    unsigned aluF (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode);
    unsigned alu (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode);
    unsigned regRead(unsigned reg, bool isF);
+   uint32_t regRename(unsigned reg, bool isF, uint32_t& tag, bool& ready);
    unsigned regTag(unsigned reg, bool isF);
    unsigned read_memory(unsigned address);
    void set_fp_reg_tag(unsigned reg, int tag, bool busy);

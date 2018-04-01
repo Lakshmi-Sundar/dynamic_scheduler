@@ -5,7 +5,7 @@ using namespace std;
 //used for debugging purposes
 static const char *stage_names[NUM_STAGES] = {"ISSUE", "EXE", "WR", "COMMIT"};
 static const char *instr_names[NUM_OPCODES] = {"LW", "SW", "ADD", "ADDI", "SUB", "SUBI", "XOR", "XORI", "OR", "ORI", "AND", "ANDI", "MULT", "DIV", "BEQZ", "BNEZ", "BLTZ", "BGTZ", "BLEZ", "BGEZ", "JUMP", "EOP", "LWS", "SWS", "ADDS", "SUBS", "MULTS", "DIVS"};
-static const char *res_station_names[5]={"Int", "Add", "Mult", "Load"};
+static const char *res_station_names[5]={"Int", "Load", "Add", "Mult"};
 
 map <string, opcode_t> opcode_2str = { {"LW", LW}, {"SW", SW}, {"ADD", ADD}, {"ADDI", ADDI}, {"SUB", SUB}, {"SUBI", SUBI}, {"XOR", XOR}, {"XORI", XORI}, {"OR", OR}, {"ORI", ORI}, {"AND", AND}, {"ANDI", ANDI}, {"MULT", MULT}, {"DIV", DIV}, {"BEQZ", BEQZ}, {"BNEZ", BNEZ}, {"BLTZ", BLTZ}, {"BGTZ", BGTZ}, {"BLEZ", BLEZ}, {"BGEZ", BGEZ}, {"JUMP", JUMP}, {"EOP", EOP}, {"LWS", LWS}, {"SWS", SWS}, {"ADDS", ADDS}, {"SUBS", SUBS}, {"MULTS", MULTS}, {"DIVS", DIVS}};
 
@@ -85,9 +85,30 @@ instructT sim_ooo::fetchInstruction ( unsigned pc ) {
    return instruct;
 }
 
+uint32_t sim_ooo::regRename(unsigned reg, bool isF, uint32_t& tag, bool& ready){
+   uint32_t value         = UNDEFINED;
+   ready                  = true;
+   tag                    = UNDEFINED;
+   //setting bits for values ready/not ready
+   if(regBusy(reg, isF)) {
+      tag                 = regTag(reg, isF);
+      robT* robP          = rob.peekIndex(tag);
+      if(robP->ready){
+         value            = robP->value;
+         tag              = UNDEFINED;
+      }
+      else{
+         ready            = false;
+      }
+   }
+   else{
+      value               = regRead(reg, isF);
+   }
+   return value;
+}
+
 // The following function is for IF + ID + RR
 void sim_ooo::fetch(){
-   cout << rob.isFull() << endl;
     for (int j = 0; j < issueWidth && !rob.isFull(); j++){
       //fetching instruction according to PC
       instructT instruct     = fetchInstruction ( PC );
@@ -101,11 +122,11 @@ void sim_ooo::fetch(){
 
       //Checking if reservation station is not full 
       if (resStation[rUnit].size() < resStSize[rUnit]) {
-         instruct.print();
          robT robEntry;
 
          dynInstructPT dInstP   = new dynInstructT(instruct);
          dInstP->state          = ISSUE;
+         dInstP->t_issue        = cycleCount;
 
          robEntry.dInstP        = dInstP;
          uint32_t robIndex      = rob.push(robEntry);
@@ -116,17 +137,20 @@ void sim_ooo::fetch(){
          resStationT* resP      = new resStationT();
 
          resP->dInstP           = dInstP;
-         resP->vj               = (instruct.src1Valid) ? regRead(instruct.src1, instruct.src1F) : UNDEFINED;
-         resP->vk               = (instruct.src2Valid) ? regRead(instruct.src2, instruct.src2F) : UNDEFINED;
-         resP->qj               = (instruct.src1Valid) ? regTag(instruct.src1, instruct.src1F)  : UNDEFINED;
-         resP->qk               = (instruct.src2Valid) ? regTag(instruct.src2, instruct.src2F)  : UNDEFINED;
-         resP->tagD             = robIndex;
 
-         //setting bits for values ready/not ready
-         if(instruct.src1Valid && regBusy(instruct.src1, instruct.src1F)) 
-            resP->vjR  = false; 
-         if(instruct.src2Valid && regBusy(instruct.src2, instruct.src2F))
-            resP->vkR  = false; 
+         // Rename source operands
+         if( instruct.src1Valid ){
+            uint32_t qj;
+            resP->vj            = regRename(instruct.src1, instruct.src1F, qj, resP->vjR);
+            resP->qj            = qj;
+         }
+         if( instruct.src2Valid ){
+            uint32_t qk;
+            resP->vk            = regRename(instruct.src2, instruct.src2F, qk, resP->vkR);
+            resP->qk            = qk;
+         }
+
+         resP->tagD             = robIndex;
 
          //Updating address field of reservation station entry according to memory unit
          if( unit == MEMORY )
@@ -134,8 +158,8 @@ void sim_ooo::fetch(){
 
          // Get the id
          int id                 = 0;
-         for( int index = 0; index < resStation[rUnit].size(); index++ ){
-            if( resStation[rUnit][index].id != index ){
+         for( int index = 0; index < (int)resStation[rUnit].size(); index++ ){
+            if( resStation[rUnit][index]->id != index ){
                id               = index;
                break;
             }
@@ -158,7 +182,6 @@ void sim_ooo::fetch(){
       }
       else{
          // Reservation station is full
-         cout << "RSFULL" << endl; 
          break;
       }
       //Break if Branch to create a basic block
@@ -206,6 +229,7 @@ void sim_ooo::dispatch(){
                   execFp[execUnit].lanes[laneId].outputReady = is_load && bypassReady;
                   execFp[execUnit].lanes[laneId].output      = (is_load && bypassReady) ? bypassValue : UNDEFINED;
                   resP->dInstP->state                        = EXECUTE;
+                  resP->dInstP->t_execute                    = cycleCount;
                   if( is_store || is_load )
                      resP->addr                              = addr;
                   if( is_store ){
@@ -366,6 +390,7 @@ void sim_ooo::writeResult(){
          if(execFp[i].lanes[j].ttl == 1){
             resStationT* resP         = execFp[i].lanes[j].payloadP;
             resP->dInstP->state       = WRITE_RESULT;
+            resP->dInstP->t_wr        = cycleCount;
             execWrLaneT* laneP        = &(execFp[i].lanes[j]);
             ASSERT( laneP->outputReady, "At WriteResult, output not ready!" );
 
@@ -381,12 +406,14 @@ void sim_ooo::writeResult(){
                   }
 
                   if(resStation[unit][k]->qj == resP->tagD) {
-                     resStation[unit][k]->vj = laneP->output;
-                     resStation[unit][k]->qj = UNDEFINED;
+                     resStation[unit][k]->vj  = laneP->output;
+                     resStation[unit][k]->vjR = true;
+                     resStation[unit][k]->qj  = UNDEFINED;
                   }
                   if(resStation[unit][k]->qk == resP->tagD) {
-                     resStation[unit][k]->vk = laneP->output;
-                     resStation[unit][k]->qk = UNDEFINED;
+                     resStation[unit][k]->vk  = laneP->output;
+                     resStation[unit][k]->vkR = true;
+                     resStation[unit][k]->qk  = UNDEFINED;
                   }
                }
             }
@@ -456,7 +483,6 @@ void sim_ooo::commit(){
 void sim_ooo::run(unsigned cycles){
    bool rtc = (cycles == 0);
    while(cycles-- || rtc) {
-      print_status();
       commit();
       writeResult();
       execute();
@@ -468,7 +494,7 @@ void sim_ooo::run(unsigned cycles){
 //reset the state of the sim_oooulator
 void sim_ooo::reset(){
    for(unsigned i = 0; i < data_memory_size; i++) {
-      data_memory[i]   = UNDEFINED; 
+      data_memory[i]   = (unsigned char)UNDEFINED; 
    }
 
    //initializing GPRs to UNDEFINED
@@ -553,7 +579,10 @@ int sim_ooo::exLatency(opcode_t opcode) {
 }
 
 uint32_t sim_ooo::agen ( instructT instruct) {
-   return (instruct.imm + regRead(instruct.src1, instruct.src1F));
+   if(instruct.src1Valid)
+      return (instruct.imm + regRead(instruct.src1, instruct.src1F));
+   else
+      return UNDEFINED;
 }
 
 //ALU function for floating point operations
@@ -679,7 +708,6 @@ int sim_ooo::get_int_register(unsigned reg){
 	return gprFile[reg].value; 
 }
 
-//TODOVJ: Check if this is necessary
 void sim_ooo::set_int_register(unsigned reg, int value){
    gprFile[reg].value = value;
 }
@@ -688,7 +716,6 @@ float sim_ooo::get_fp_register(unsigned reg){
 	return fpFile[reg].value;
 }
 
-//TODOVJ: Check if this is necessary
 void sim_ooo::set_fp_register(unsigned reg, float value){
    fpFile[reg].value = value;
 }
@@ -704,11 +731,11 @@ void sim_ooo::set_int_reg_tag(unsigned reg, int tag, bool busy){
 }
 
 unsigned sim_ooo::get_pending_int_register(unsigned reg){
-	return UNDEFINED; //fill here
+   return regTag(reg, false);
 }
 
 unsigned sim_ooo::get_pending_fp_register(unsigned reg){
-	return UNDEFINED; //fill here
+   return regTag(reg, true);
 }
 //-------------------------------------------------------------------------------------------------------//
 
@@ -778,8 +805,24 @@ void sim_ooo::print_rob(){
 
       if( !busy )
          cout << setfill(' ') << setw(5) << i+1 << setw(6) << "no" << setw(7) << "no" << setw(12) << "-" << setw(10) << "-" << setw(6) << "-" << setw(12) << "-" << endl;
-      else
-         cout << setfill(' ') << setw(5) << i+1 << setw(6) << (busy ? "yes" : "no") << setw(7) << (ready ? "yes" : "no") << setw(12) << dInstP->pc << hex << "/0x" << setw(10) << stage_names[dInstP->state] << setw(6) << (dInstP->dstValid ? (dInstP->dstF ? "F" : "R") : "-") << setw(12) << robP->value << endl;
+      else{
+         cout << setfill(' ') << setw(5) << i+1 << setw(6) << (busy ? "yes" : "no") << setw(7) << (ready ? "yes" : "no") << setw(4) << "0x" << setw(8) << setfill('0') << dInstP->pc << hex << setw(10) << setfill(' ') << stage_names[dInstP->state] << setw(5);
+
+         if(dInstP->dstValid){
+            cout << (dInstP->dstF ? "F" : "R");
+            cout << dInstP->dst;
+         }
+         else
+            cout << "-";
+
+         cout << setw(12);
+
+         if(robP->value == UNDEFINED)
+            cout << "-";
+         else
+            cout << setw(5) << setfill(' ') << "0x" << setw(8) << setfill('0') << robP->value << hex;
+         cout << endl;
+      }
 
    }
 	
@@ -792,12 +835,46 @@ void sim_ooo::print_reservation_stations(){
 	cout << setw(7) << "Name" << setw(6) << "Busy" << setw(12) << "PC" << setw(12) << "Vj" << setw(12) << "Vk" << setw(6) << "Qj" << setw(6) << "Qk" << setw(6) << "Dest" << setw(12) << "Address" << endl; 
 	
 	for( int unit = 0; unit < RS_TOTAL; unit++ ){
-      for( int i = 0; i < resStation[unit].size(); i++ ){
+      for( int i = 0; i < (int)resStation[unit].size(); i++ ){
          resStationT* resP  = resStation[unit][i];
          for( int j = i; j < resStation[unit][i]->id; j++ ){
-            cout << setw(7) << res_station_names[unit] << setw(6) << "no" << setw(12) << "-" << setw(12) << "-" << setw(12) << "-" << setw(6) << "-" << setw(6) << "-" << setw(6) << "-" << setw(12) << "-" << endl; 
+            cout << setw(7) << res_station_names[unit] << j+1 << setw(6) << "no" << setw(12) << "-" << setw(12) << "-" << setw(12) << "-" << setw(6) << "-" << setw(6) << "-" << setw(6) << "-" << setw(12) << "-" << endl; 
          }
-         cout << setw(7) << res_station_names[unit] << setw(6) << "no" << setw(12) << resP->dInstP->pc << setw(12) << resP->vj << setw(12) << resP->vk << setw(6) << resP->qj << setw(6) << resP->qk << setw(6) << resP->dest << setw(12) << resP->addr << endl; 
+         cout << setw(7) << res_station_names[unit] << i+1 << setw(6) << "yes";
+         cout << setw(4) << "0x" << setw(8) << setfill('0') << resP->dInstP->pc << hex;
+
+         if( resP->vj == UNDEFINED )
+            cout << setw(12) << "-";
+         else
+            cout << setw(4) << setfill(' ') << "0x" << setw(8) << setfill('0') << resP->vj << hex << setfill(' ');
+
+         if( resP->vk == UNDEFINED )
+            cout << setw(12) << "-";
+         else
+            cout << setw(4) << setfill(' ') << "0x" << setw(8) << setfill('0') << resP->vk << hex << setfill(' ');
+
+
+         if( resP->qj == UNDEFINED )
+            cout << setw(6) << "-";
+         else
+            cout << setw(6) << resP->qj << hex << setfill(' ');
+
+         if( resP->qk == UNDEFINED )
+            cout << setw(6) << "-";
+         else
+            cout << setw(6) << resP->qk << hex << setfill(' ');
+
+         cout << setw(6) << resP->tagD;
+
+         if( resP->addr == UNDEFINED )
+            cout << setw(12) << "-";
+         else
+            cout << setw(4) << setfill(' ') << "0x" << setw(8) << setfill('0') << resP->addr << hex << setfill(' ');
+
+         cout << endl;
+      }
+      for( unsigned i = resStation[unit].size(); i < resStSize[unit]; i++ ){
+         cout << setw(7) << res_station_names[unit] << i+1 << setw(6) << "no" << setw(12) << "-" << setw(12) << "-" << setw(12) << "-" << setw(6) << "-" << setw(6) << "-" << setw(6) << "-" << setw(12) << "-" << endl; 
       }
    }
 
@@ -807,7 +884,32 @@ void sim_ooo::print_reservation_stations(){
 void sim_ooo::print_pending_instructions(){
 	cout << "PENDING INSTRUCTIONS STATUS" << endl;
 	cout << setfill(' ');
-	cout << setw(10) << "PC" << setw(7) << "Issue" << setw(7) << "Exe" << setw(7) << "WR" << setw(7) << "Commit";
+	cout << setw(10) << "PC" << setw(7) << "Issue" << setw(7) << "Exe" << setw(7) << "WR" << setw(7) << "Commit" << endl;
+   for(unsigned i = 0; i < robSize; i++){
+      bool busy            = rob.isBusy(i);
+      robT* robP           = busy ? rob.peekIndex(i) : NULL;
+      dynInstructPT dP     = busy ? robP->dInstP : NULL;
+
+      if( !busy )
+         cout << setw(10) << "-" << setw(7) << "-" << setw(7) << "-" << setw(7) << "-" << setw(7) << "-" << endl;
+      else{
+         cout << "0x" << setw(8) << setfill('0') << robP->dInstP->pc << hex << setfill(' ');
+         if( dP->t_issue == UNDEFINED ) cout << setw(7) << "-";
+         else                           cout << setw(7) << dP->t_issue << dec;
+
+         if( dP->t_execute == UNDEFINED ) cout << setw(7) << "-";
+         else                             cout << setw(7) << dP->t_execute << dec;
+
+         if( dP->t_wr == UNDEFINED ) cout << setw(7) << "-";
+         else                        cout << setw(7) << dP->t_wr << dec;
+
+         if( dP->t_commit == UNDEFINED ) cout << setw(7) << "-";
+         else                            cout << setw(7) << dP->t_commit << dec;
+
+         cout << endl;
+      }
+
+   }
 	cout << endl;
 }
 

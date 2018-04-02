@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <map>
 #include <vector>
+#include <algorithm>
 
 using namespace std;
 
@@ -116,20 +117,27 @@ struct instructT{
    }
 };
 
-struct dynInstructT : public instructT{
+struct instStatT{
    unsigned           t_issue;
    unsigned           t_execute;
    unsigned           t_wr;
    unsigned           t_commit;
    stage_t            state;
-
-   dynInstructT( instructT input ){
-      copy(input);
+   unsigned           pc;
+   instStatT(){
       t_issue          = UNDEFINED;
       t_execute        = UNDEFINED;
       t_wr             = UNDEFINED;
       t_commit         = UNDEFINED;
       state            = ISSUE;
+      pc               = UNDEFINED;
+   }
+};
+
+struct dynInstructT : public instructT{
+   instStatT stat;
+   dynInstructT( instructT input ){
+      copy(input);
    }
 };
 
@@ -296,6 +304,8 @@ class sim_ooo{
 
    unsigned       robSize;
    int            issueWidth;
+   bool           gSquash;
+   vector <instStatT> log;
 
    //----------------------------------------------------------------------------//
 
@@ -388,14 +398,14 @@ class sim_ooo{
    //print the whole execution history 
    void print_log();
    instructT fetchInstruction ( unsigned pc ) ;
-   void fetch();
-   void dispatch();
+   bool fetch();
+   bool dispatch();
    bool isConflictingStore(int loadTag, unsigned memAddress, bool& bypassReady, uint32_t& bypassValue );
-   void issue() ;
-   void execute();
-   uint32_t aluGetOutput(dynInstructT* dInstP, uint32_t addr, bool& misPred);
-   void writeResult();
-   void commit();
+   bool issue() ;
+   bool execute();
+   uint32_t aluGetOutput(dynInstructT* dInstP, unsigned src1V, unsigned src2V, uint32_t addr, bool& misPred);
+   bool writeResult(vector<res_station_t>& resGCUnit, vector<int>& resGCIndex);
+   bool commit(int& popCount);
    void squash();
    bool regBusy(uint32_t regNo, bool isF) ;
    exe_unit_t opcodeToExUnit(opcode_t opcode);
@@ -416,6 +426,7 @@ class sim_ooo{
          int line_num );
    void getReg( istringstream& buff_iss, uint32_t& reg, bool& regF, bool with_brackets=false );
    int parse( const string filename, unsigned base_address );
+   bool static resStSort( resStationT* a, resStationT* b ) { return a->id < b->id; };
 };
 
 #endif /*SIM_OOO_H_*/

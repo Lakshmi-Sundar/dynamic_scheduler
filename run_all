@@ -1,0 +1,13 @@
+#!/bin/bash
+
+./bin/testcase1 > test_1
+./bin/testcase2 > test_2
+./bin/testcase3 > test_3
+./bin/testcase4 > test_4
+./bin/testcase5 > test_5
+
+gvim -d test_1 testcases/testcase1.out
+gvim -d test_2 testcases/testcase2.out
+gvim -d test_3 testcases/testcase3.out
+gvim -d test_4 testcases/testcase4.out
+gvim -d test_5 testcases/testcase5.out

@@ -200,8 +200,8 @@ bool sim_ooo::fetch(){
 
 // The following function is for IS
 bool sim_ooo::dispatch(){
-   cout << "cycle count: " << dec << cycleCount << endl;
    bool status = false;
+   //cout << "CycleCount: " << cycleCount << endl;
    //To iterate through reservation station units
    for(int unit = 0; unit < RS_TOTAL; unit++) {
       //To iterate through individual units
@@ -221,8 +221,9 @@ bool sim_ooo::dispatch(){
             instReady      = !isConflictingStore(resP->tagD, addr, bypassReady, bypassValue);
          } 
 
-         resP->dInstP->print();
-         cout << !resP->inExec << resP->vjR << resP->vkR << instReady << endl;
+         //resP->dInstP->print();
+         //cout << hex << resP->dInstP->pc << " :: " << !resP->inExec << resP->vjR << resP->vkR << instReady << endl;
+         //cout << bypassReady << endl;
          if ( !resP->inExec && resP->vjR && resP->vkR && instReady ){
             int execUnit   = opcodeToExUnit(resP->dInstP->opcode);
             int numLanes   = execFp[execUnit].numLanes;
@@ -232,8 +233,8 @@ bool sim_ooo::dispatch(){
                //checking for free execution units
                bool laneCond = ((laneId < (numLanes - 1)) && !bypassReady && !is_store) ||
                                ((laneId == (numLanes - 1)) && (bypassReady || is_store));
+               //cout << "TTL: " <<  execFp[execUnit].lanes[laneId].ttl << endl;
                if(execFp[execUnit].lanes[laneId].ttl == 0 && ((isMemUnit && laneCond) || !isMemUnit ) ){
-                  cout << "Dispatched" << endl;
                   resP->inExec                            = true;
                   execFp[execUnit].lanes[laneId].payloadP = resP;
                   // How much time will the operation take to complete
@@ -248,8 +249,13 @@ bool sim_ooo::dispatch(){
                   // Setting up outputs
                   execFp[execUnit].lanes[laneId].outputReady = is_load && bypassReady;
                   execFp[execUnit].lanes[laneId].output      = (is_load && bypassReady) ? bypassValue : UNDEFINED;
-                  if( is_store )
+                  if( is_store ){
+                     //cout << resP->dInstP->is_store << resP->dInstP->is_load << ", " << resP->dInstP->imm << ", " << (int) resP->vj << ", " << (int) resP->vk << endl;
+                     //cout << resP->dInstP->src1 << ", " << resP->dInstP->src2 << endl;
+                     //resP->dInstP->print();
                      rob.peekIndex( resP->tagD )->dest       = addr;
+                     //cout << "Addr: " << hex << addr << endl;
+                  }
                   break;
                }
             }
@@ -476,6 +482,10 @@ bool sim_ooo::commit(int& popCount){
       int headTag      = rob.genIndex(i);
       status           = true;
       if(head->ready){
+         if(head->dInstP->is_store) {
+            if( execFp[MEMORY].lanes[0].ttl != 0 )
+               break;
+         }
 
          if( head->dInstP->stat.state != COMMIT ){
             head->dInstP->stat.state    = COMMIT;
@@ -496,7 +506,6 @@ bool sim_ooo::commit(int& popCount){
 
          instCount++;
          gSquash      = head->dInstP->is_branch && head->misPred;
-         uint32_t npc = head->value;
 
          // Update RF
          if(head->dInstP->dstValid){
@@ -519,8 +528,6 @@ bool sim_ooo::commit(int& popCount){
 
          //--------------- BRANCH --------------
          if(gSquash){
-            PC = npc;
-            squash();
             break;
          }
       }
@@ -542,13 +549,13 @@ void sim_ooo::run(unsigned cycles){
       int popCount;
 
       status       = commit(popCount);
-      if( !gSquash ){
-         vector<res_station_t> resGCUnit;
-         vector<int>           resGCIndex;
-         status   |= writeResult(resGCUnit, resGCIndex);
-         status   |= execute();
-         status   |= issue();
+      vector<res_station_t> resGCUnit;
+      vector<int>           resGCIndex;
+      status   |= writeResult(resGCUnit, resGCIndex);
+      status   |= execute();
+      status   |= issue();
 
+      if( !gSquash ){
          for( int i = 0; i < popCount; i++ ){
             bool underflow;
             robT robEntry  = rob.pop(underflow);
@@ -569,8 +576,10 @@ void sim_ooo::run(unsigned cycles){
             delElems++;
          }
       }
-      else
+      else{
+         squash(); 
          status    = true;
+      }
 
       cycles = cycles > 0 ? cycles - 1 : 0;
       cycleCount++;
@@ -594,6 +603,7 @@ void sim_ooo::reset(){
       fpFile[i].value  = UNDEFINED;
    }
    // Squash/Flush the pipeline
+
    squash();
 }
 
@@ -608,7 +618,22 @@ void sim_ooo::squash(){
    for(int i = 0; i < RS_TOTAL; i++){
       resStation[i].clear();
    }
-   //Clearing ROB
+
+   PC                = rob.peekHead()->value;
+   //Clearing ROB and recording history
+   int popCount      = rob.getCount();
+   for( int i = 0; i < popCount; i++ ){
+      bool underflow;
+      robT robEntry  = rob.pop(underflow);
+      instStatT stat;
+      stat.pc        = robEntry.dInstP->pc;
+      stat.t_issue   = robEntry.dInstP->stat.t_issue;
+      stat.t_execute = robEntry.dInstP->stat.t_execute;
+      stat.t_wr      = robEntry.dInstP->stat.t_wr;
+      stat.t_commit  = robEntry.dInstP->stat.t_commit;
+      log.push_back(stat);
+      ASSERT(!underflow, "ROB underflown");
+   }
    rob.popAll();
 
    // Flash clear busy bits
@@ -1021,7 +1046,32 @@ void sim_ooo::print_log(){
    cout << "EXECUTION LOG" << endl;
    cout << setw(12) << setfill(' ') << "PC" << setw(7) << "Issue" << setw(7) << "Exe" << setw(7) << "WR" << setw(7) << "Commit" << endl;
    for( unsigned i = 0; i < log.size(); i++ ){
-      cout << "0x" << setw(8) << hex << setfill('0') << log[i].pc << setw(7) << setfill(' ') << dec << log[i].t_issue << setw(7) << log[i].t_execute << setw(7) << log[i].t_wr << setw(7) << log[i].t_commit << endl;
+      cout << "0x" << setw(8) << hex << setfill('0') << log[i].pc << setw(7) << setfill(' ');
+      if( log[i].t_issue == UNDEFINED )
+         cout << "-";
+      else
+         cout << dec << log[i].t_issue;
+      
+      cout << setw(7);
+      
+      if( log[i].t_execute == UNDEFINED )
+         cout << "-";
+      else
+         cout << log[i].t_execute;
+      
+      cout << setw(7);
+      if( log[i].t_wr == UNDEFINED )
+         cout << "-";
+      else
+         cout << log[i].t_wr;
+      
+      cout << setw(7);
+      if( log[i].t_commit == UNDEFINED )
+         cout << "-";
+      else
+         cout << log[i].t_commit;
+      
+      cout << endl;
    }
 }
 
@@ -1218,7 +1268,7 @@ void sim_ooo::getReg( istringstream& buff_iss, uint32_t& reg, bool& regF, bool w
    string reg_i_or_f, open_bracket, closed_bracket;
 
    if( with_brackets )
-      buff_iss >> setw(1) >> open_bracket >> setw(1) >> reg_i_or_f >> reg >> closed_bracket;
+      buff_iss >> setw(1) >> /*open_bracket >> setw(1) >> */ reg_i_or_f >> reg >> closed_bracket;
    else
       buff_iss >> setw(1) >> reg_i_or_f >> reg;
 
@@ -1389,7 +1439,8 @@ int sim_ooo::parse( const string filename, unsigned base_address ){
             // Interestingly, ->imm field is of type int
             // extracting from buff_iss onto ->imm will stop right
             // before "(" which is exactly what we want
-            buff_iss >> instructP->imm;
+            getline(buff_iss, imm, '(');
+            instructP->imm        = stod(imm);
             // Following line is self explanatory on what is happening
             // at this point in code
             // Format to parse at this point of code: (R%d)
@@ -1406,7 +1457,8 @@ int sim_ooo::parse( const string filename, unsigned base_address ){
             // Interestingly, ->imm field is of type int
             // extracting from buff_iss onto ->imm will stop right
             // before "(" which is exactly what we want
-            buff_iss >> instructP->imm;
+            getline(buff_iss, imm, '(');
+            instructP->imm        = stod(imm);
             // Following line is self explanatory on what is happening
             // at this point in code
             // Format to parse at this point of code: (R%d)

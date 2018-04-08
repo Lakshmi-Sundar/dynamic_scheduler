@@ -89,7 +89,7 @@ struct instructT{
    }
 
    void print(){
-      cout << "Opcode: " << opcode_str[opcode] << ", dst: " << dst << ", src1: " << src1 << ", src2: " << src2 << ", imm: " << imm << ", dstValid: " << dstValid << ", src1Valid: " << src1Valid << ", src2Valid: " << src2Valid << ", dstF: " << dstF << ", src1F: " << src1F << ", src2F: " << src2F << ", is_stall: " << is_stall << ", is_branch: " << is_branch << endl;
+      cout << "Opcode: " << opcode_str[opcode] << ", dst: " << dst << ", src1: " << src1 << ", src2: " << src2 << ", imm: " << imm << ", dstValid: " << dstValid << ", src1Valid: " << src1Valid << ", src2Valid: " << src2Valid << ", dstF: " << dstF << ", src1F: " << src1F << ", src2F: " << src2F << ", is_stall: " << is_stall << ", is_branch: " << is_branch << "PC" << pc << endl;
    }
 
    void nop(){
@@ -400,6 +400,7 @@ class sim_ooo{
    instructT fetchInstruction ( unsigned pc ) ;
    bool fetch();
    bool dispatch();
+   void predispatch();
    bool isConflictingStore(int loadTag, unsigned memAddress, bool& bypassReady, uint32_t& bypassValue );
    bool issue() ;
    bool execute();
@@ -410,7 +411,7 @@ class sim_ooo{
    bool regBusy(uint32_t regNo, bool isF) ;
    exe_unit_t opcodeToExUnit(opcode_t opcode);
    int exLatency(opcode_t opcode) ;
-   uint32_t agen (instructT instruct) ;
+   uint32_t agen (resStationT* resP) ;
    unsigned aluF (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode);
    unsigned alu (unsigned _value1, unsigned _value2, bool value1F, bool value2F, opcode_t opcode);
    unsigned regRead(unsigned reg, bool isF);

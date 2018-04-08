@@ -5,9 +5,19 @@
 ./bin/testcase3 > test_3
 ./bin/testcase4 > test_4
 ./bin/testcase5 > test_5
+./bin/testcase6 > test_6
+./bin/testcase7 > test_7
+./bin/testcase8 > test_8
+./bin/testcase9 > test_9
+./bin/testcase10 > test_10
 
 gvim -d test_1 testcases/testcase1.out
 gvim -d test_2 testcases/testcase2.out
 gvim -d test_3 testcases/testcase3.out
 gvim -d test_4 testcases/testcase4.out
 gvim -d test_5 testcases/testcase5.out
+gvim -d test_6 testcases/testcase6.out
+gvim -d test_7 testcases/testcase7.out
+gvim -d test_8 testcases/testcase8.out
+gvim -d test_9 testcases/testcase9.out
+gvim -d test_10 testcases/testcase10.out

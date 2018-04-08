@@ -69,6 +69,8 @@ sim_ooo::~sim_ooo(){
 }
 
 void sim_ooo::init_exec_unit(exe_unit_t exec_unit, unsigned latency, unsigned instances){
+   if( exec_unit == MEMORY )
+      instances++;
    execFp[exec_unit].init(instances, latency);
 }
 
@@ -133,10 +135,11 @@ bool sim_ooo::fetch(){
          dInstP->stat.t_issue   = cycleCount;
 
          robEntry.dInstP        = dInstP;
-         uint32_t robIndex      = rob.push(robEntry);
 
          if(instruct.is_store)
             robEntry.memLatency = execFp[MEMORY].latency;
+
+         uint32_t robIndex      = rob.push(robEntry);
 
          resStationT* resP      = new resStationT();
 
@@ -153,7 +156,6 @@ bool sim_ooo::fetch(){
             resP->vk            = regRename(instruct.src2, instruct.src2F, qk, resP->vkR);
             resP->qk            = qk;
          }
-
          resP->tagD             = robIndex;
 
          //Updating address field of reservation station entry according to memory unit
@@ -161,9 +163,11 @@ bool sim_ooo::fetch(){
             resP->addr          = instruct.imm;
 
          // Get the id
-         int id                 = resStation[rUnit].size();
-         for( int index = 0; index < (int)resStation[rUnit].size(); index++ ){
-            if( resStation[rUnit][index]->id != index ){
+         vector<resStationT*> resSt = resStation[rUnit];
+         sort(resSt.begin(), resSt.end(), resStSort);
+         int id                 = resSt.size();
+         for( int index = 0; index < (int)resSt.size(); index++ ){
+            if( resSt[index]->id != index ){
                id               = index;
                break;
             }
@@ -196,6 +200,7 @@ bool sim_ooo::fetch(){
 
 // The following function is for IS
 bool sim_ooo::dispatch(){
+   cout << "cycle count: " << dec << cycleCount << endl;
    bool status = false;
    //To iterate through reservation station units
    for(int unit = 0; unit < RS_TOTAL; unit++) {
@@ -210,17 +215,25 @@ bool sim_ooo::dispatch(){
          uint32_t bypassValue  = UNDEFINED;
          bool is_store         = resP->dInstP->is_store;
          bool is_load          = resP->dInstP->is_load;
-         uint32_t addr         = agen(*(resP->dInstP));
-
+         uint32_t addr         = agen(resP);
+         
          if( is_load ){
             instReady      = !isConflictingStore(resP->tagD, addr, bypassReady, bypassValue);
          } 
 
+         resP->dInstP->print();
+         cout << !resP->inExec << resP->vjR << resP->vkR << instReady << endl;
          if ( !resP->inExec && resP->vjR && resP->vkR && instReady ){
             int execUnit   = opcodeToExUnit(resP->dInstP->opcode);
-            for(int laneId = 0; laneId < execFp[execUnit].numLanes; laneId++){
+            int numLanes   = execFp[execUnit].numLanes;
+            bool isMemUnit = execUnit == MEMORY;
+
+            for(int laneId = 0; laneId < numLanes; laneId++){
                //checking for free execution units
-               if(execFp[execUnit].lanes[laneId].ttl == 0) {
+               bool laneCond = ((laneId < (numLanes - 1)) && !bypassReady && !is_store) ||
+                               ((laneId == (numLanes - 1)) && (bypassReady || is_store));
+               if(execFp[execUnit].lanes[laneId].ttl == 0 && ((isMemUnit && laneCond) || !isMemUnit ) ){
+                  cout << "Dispatched" << endl;
                   resP->inExec                            = true;
                   execFp[execUnit].lanes[laneId].payloadP = resP;
                   // How much time will the operation take to complete
@@ -235,10 +248,8 @@ bool sim_ooo::dispatch(){
                   // Setting up outputs
                   execFp[execUnit].lanes[laneId].outputReady = is_load && bypassReady;
                   execFp[execUnit].lanes[laneId].output      = (is_load && bypassReady) ? bypassValue : UNDEFINED;
-                  //if( is_store || is_load )
-                  //   resP->addr                              = agen(*(resP->dInstP));
-                  //if( is_store )
-                  //   rob.peekIndex( resP->tagD )->dest       = addr;
+                  if( is_store )
+                     rob.peekIndex( resP->tagD )->dest       = addr;
                   break;
                }
             }
@@ -261,7 +272,7 @@ bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassR
       //checking if the opcode is store
       if( robEntryP->dInstP->is_store ){
          //if the store is not complete (a.k.a ??), then there is a conflict
-         if(!robEntryP->ready){
+         if( robEntryP->dest == UNDEFINED ){
             conflict           = true;
             bypassReady        = false;
          }
@@ -306,10 +317,9 @@ bool sim_ooo::execute(){
             }
             bool is_store                 = resP->dInstP->is_store;
             bool is_load                  = resP->dInstP->is_load;
+
             if( is_store || is_load )
-               resP->addr                              = agen(*(resP->dInstP));
-            if( is_store )
-               rob.peekIndex( resP->tagD )->dest       = agen(*(resP->dInstP));
+               resP->addr                              = agen(resP);
 
             status          = true;
             if( laneP->ttl  == 1 ) {
@@ -340,8 +350,8 @@ uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, unsigned src1V, unsigned sr
    misPred         = false;
 
    switch(opcode) {
-      case LW ... SW:
-      case LWS ... SWS:
+      case LW:
+      case LWS:
          aluOut  = read_memory (addr);
          break;
 
@@ -389,6 +399,10 @@ uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, unsigned src1V, unsigned sr
          aluOut  = alu(npc, imm, false, false, opcode);
          break;
 
+      case SW:
+      case SWS:
+         aluOut = src1V;
+         break;
       case EOP:
          break;
 
@@ -462,11 +476,16 @@ bool sim_ooo::commit(int& popCount){
       int headTag      = rob.genIndex(i);
       status           = true;
       if(head->ready){
-         instCount++;
+
+         if( head->dInstP->stat.state != COMMIT ){
+            head->dInstP->stat.state    = COMMIT;
+            head->dInstP->stat.t_commit = cycleCount;
+         }
+
          //--------------- STORE ---------------
          if(head->dInstP->is_store) {
+            head->memLatency--;
             if(head->memLatency != 0){
-               head->memLatency--;
                break;
             }
             else{
@@ -474,6 +493,8 @@ bool sim_ooo::commit(int& popCount){
             }
          }
 
+
+         instCount++;
          gSquash      = head->dInstP->is_branch && head->misPred;
          uint32_t npc = head->value;
 
@@ -536,7 +557,7 @@ void sim_ooo::run(unsigned cycles){
             stat.t_issue   = robEntry.dInstP->stat.t_issue;
             stat.t_execute = robEntry.dInstP->stat.t_execute;
             stat.t_wr      = robEntry.dInstP->stat.t_wr;
-            stat.t_commit  = cycleCount;
+            stat.t_commit  = robEntry.dInstP->stat.t_commit;
             log.push_back(stat);
             ASSERT(!underflow, "ROB underflown");
          }
@@ -650,11 +671,10 @@ int sim_ooo::exLatency(opcode_t opcode) {
    return execFp[opcodeToExUnit(opcode)].latency;
 }
 
-uint32_t sim_ooo::agen ( instructT instruct) {
-   if(instruct.src1Valid)
-      return (instruct.imm + regRead(instruct.src1, instruct.src1F));
-   else
-      return UNDEFINED;
+uint32_t sim_ooo::agen ( resStationT* resP ) {
+   uint32_t stAddr  = resP->dInstP->imm + (int) resP->vk;
+   uint32_t ldAddr  = resP->dInstP->imm + (int) resP->vj;
+   return resP->dInstP->is_store ? stAddr : (resP->dInstP->is_load ? ldAddr : UNDEFINED);
 }
 
 //ALU function for floating point operations
@@ -876,13 +896,19 @@ void sim_ooo::print_rob(){
       bool ready           = busy ? busy && (robP->ready) : false;
 
       if( !busy )
-         cout << setfill(' ') << setw(5) << i+1 << setw(6) << "no" << setw(7) << "no" << setw(12) << "-" << setw(10) << "-" << setw(6) << "-" << setw(12) << "-" << endl;
+         cout << setfill(' ') << setw(5) << i << setw(6) << "no" << setw(7) << "no" << setw(12) << "-" << setw(10) << "-" << setw(6) << "-" << setw(12) << "-" << endl;
       else{
-         cout << setfill(' ') << setw(5) << i+1 << setw(6) << (busy ? "yes" : "no") << setw(7) << (ready ? "yes" : "no") << setw(4) << "0x" << setw(8) << setfill('0') << hex << dInstP->pc << setw(10) << setfill(' ') << stage_names[dInstP->stat.state] << setw(5);
+         cout << setfill(' ') << setw(5) << i << setw(6) << (busy ? "yes" : "no") << setw(7) << (ready ? "yes" : "no") << setw(4) << "0x" << setw(8) << setfill('0') << hex << dInstP->pc << setw(10) << setfill(' ') << stage_names[dInstP->stat.state] << setw(5);
 
          if(dInstP->dstValid){
             cout << (dInstP->dstF ? "F" : "R");
             cout << dInstP->dst;
+         }
+         else if (dInstP->is_store){
+            if(robP->dest == UNDEFINED)
+               cout << "-";
+            else
+               cout << setw(5) << setfill(' ') << "0x" << setw(8) << setfill('0') << hex << robP->dest << setfill(' ');
          }
          else
             cout << "-";
@@ -1375,7 +1401,7 @@ int sim_ooo::parse( const string filename, unsigned base_address ){
 
          case SW:
          case SWS:
-            getReg( buff_iss, instructP->src2, instructP->src2F );
+            getReg( buff_iss, instructP->src1, instructP->src1F );
             // Format to parse at this point of code: %d(R%d)
             // Interestingly, ->imm field is of type int
             // extracting from buff_iss onto ->imm will stop right
@@ -1384,7 +1410,7 @@ int sim_ooo::parse( const string filename, unsigned base_address ){
             // Following line is self explanatory on what is happening
             // at this point in code
             // Format to parse at this point of code: (R%d)
-            getReg( buff_iss, instructP->src1, instructP->src1F, true );
+            getReg( buff_iss, instructP->src2, instructP->src2F, true );
             instructP->src2Valid  = true;
             instructP->src1Valid  = true;
             instructP->is_store   = true;

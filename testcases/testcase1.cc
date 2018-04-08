@@ -2,7 +2,6 @@
 #include <iostream>
 #include <stdlib.h>
 #include <sstream>
-#include <cstring>
 
 using namespace std;
 
@@ -28,9 +27,9 @@ int main(int argc, char **argv){
 	unsigned i;
 
 	// instantiates sim_ooo with a 1MB data memory
-	sim_ooo *ooo = new sim_ooo(1024*1024, 
-				   6,
-				   1, 2, 2, 2);
+	sim_ooo *ooo = new sim_ooo(1024*1024,	//memory size 
+				   6,           //rob size
+				   1, 2, 2, 2); //int, add, mult, load reservation stations
 
 	//initialize execution units
         ooo->init_exec_unit(INTEGER, 2, 1);

@@ -6,7 +6,7 @@ CFLAGS = $(OPT) $(WARN)
 # List corresponding compiled object files here (.o files)
 SIM_OBJ = sim_ooo.o
 
-TESTCASES = testcase1 testcase2 testcase3 testcase4 testcase5 
+TESTCASES = testcase1 testcase2 testcase3 testcase4 testcase5 testcase6 testcase7 testcase8 testcase9 testcase10
  
 #################################
 

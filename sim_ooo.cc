@@ -61,6 +61,7 @@ sim_ooo::sim_ooo(unsigned mem_size,
 	data_memory            = new unsigned char[data_memory_size];
    rob                    = Fifo<robT>( rob_size );
    gSquash                = false;
+   memBlock               = false;
 
    reset();
 }
@@ -69,8 +70,6 @@ sim_ooo::~sim_ooo(){
 }
 
 void sim_ooo::init_exec_unit(exe_unit_t exec_unit, unsigned latency, unsigned instances){
-   if( exec_unit == MEMORY )
-      instances++;
    execFp[exec_unit].init(instances, latency);
 }
 
@@ -201,7 +200,6 @@ bool sim_ooo::fetch(){
 // The following function is for IS
 bool sim_ooo::dispatch(){
    bool status = false;
-   cout << "CycleCount: " << dec << cycleCount << endl;
    //To iterate through reservation station units
    for(int unit = 0; unit < RS_TOTAL; unit++) {
       //To iterate through individual units
@@ -217,14 +215,9 @@ bool sim_ooo::dispatch(){
          bool is_load          = resP->dInstP->is_load;
          uint32_t addr         = agen(resP);
          
-         cout << "Testing: ";
-         resP->dInstP->print();
          if( is_load ){
             instReady      = !isConflictingStore(resP->tagD, addr, bypassReady, bypassValue);
          } 
-
-         cout << hex << resP->dInstP->pc << " :: " << !resP->inExec << resP->vjR << resP->vkR << instReady << endl;
-         cout << bypassReady << endl;
 
          // Record address as soon as we can for disambiguation
          if( is_store && resP->vkR ){
@@ -234,29 +227,39 @@ bool sim_ooo::dispatch(){
          if ( !resP->inExec && resP->vjR && resP->vkR && instReady ){
             int execUnit   = opcodeToExUnit(resP->dInstP->opcode);
             int numLanes   = execFp[execUnit].numLanes;
-            bool isMemUnit = execUnit == MEMORY;
+            bool isMem     = execUnit == MEMORY;
                   
-            for(int laneId = 0; laneId < numLanes; laneId++){
-               //checking for free execution units
-               bool laneCond = ((laneId < (numLanes - 1)) && !bypassReady && !is_store) ||
-                               ((laneId == (numLanes - 1)) && (bypassReady || is_store));
-               //cout << "TTL: " <<  execFp[execUnit].lanes[laneId].ttl << endl;
-               if(execFp[execUnit].lanes[laneId].ttl == 0 && ((isMemUnit && laneCond) || !isMemUnit ) ){
-                  resP->inExec                            = true;
-                  execFp[execUnit].lanes[laneId].payloadP = resP;
-                  // How much time will the operation take to complete
-                  // 1. Stores take 1 cycle
-                  // 2. Bypassed loads take 1 cycle
-                  // 3. Remaining takes set cycles
-                  uint32_t ttl                            = (is_store ? 1 : ((is_load && bypassReady) ? 1 : execFp[execUnit].latency) );
-                  // Adding 1 to model 1 unit latency in Write Result
+            //TODO: check
+            if( is_store || bypassReady ){
+               // Go in bypass lane
+               resP->inExec                                     = true;
+               execWrLaneT lane;
+               lane.payloadP                                    = resP;
+               lane.outputReady                                 = is_load && bypassReady;
+               lane.output                                      = (is_load && bypassReady) ? bypassValue : UNDEFINED;
+               bypassLane.push_back( lane );
+            }
+            else{
+               // Try to go in regular lanes
+               for(int laneId = 0; laneId < numLanes; laneId++){
+                  //checking for free execution units
+                  if(execFp[execUnit].lanes[laneId].ttl == 0 && ((isMem && !memBlock) || !isMem)){
+                     resP->inExec                               = true;
+                     execFp[execUnit].lanes[laneId].payloadP    = resP;
+                     // How much time will the operation take to complete
+                     // 1. Stores take 1 cycle
+                     // 2. Bypassed loads take 1 cycle
+                     // 3. Remaining takes set cycles
+                     uint32_t ttl                               = execFp[execUnit].latency;
+                     // Adding 1 to model 1 unit latency in Write Result
 
-                  execFp[execUnit].lanes[laneId].ttl      = ttl + 1;
+                     execFp[execUnit].lanes[laneId].ttl         = ttl + 1;
 
-                  // Setting up outputs
-                  execFp[execUnit].lanes[laneId].outputReady = is_load && bypassReady;
-                  execFp[execUnit].lanes[laneId].output      = (is_load && bypassReady) ? bypassValue : UNDEFINED;
-                  break;
+                     // Setting up outputs
+                     execFp[execUnit].lanes[laneId].outputReady = false;
+                     execFp[execUnit].lanes[laneId].output      = UNDEFINED;
+                     break;
+                  }
                }
             }
          }
@@ -269,7 +272,6 @@ bool sim_ooo::dispatch(){
 bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassReady, uint32_t& bypassValue){
    bool conflict               = false;
    bypassReady                 = false;
-   cout << "Conflict check: " << memAddress << endl;
    for(int i = 0; i < rob.getCount(); i++){
       //getting the current tag
       int tag                  = rob.genIndex(i);
@@ -279,8 +281,6 @@ bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassR
       //checking if the opcode is store
       if( robEntryP->dInstP->is_store ){
          //if the store is not complete (a.k.a ??), then there is a conflict
-         cout << "Inspect: " << robEntryP->dest << ", " << robEntryP->ready << endl;
-         robEntryP->dInstP->print();
          if( robEntryP->dest == UNDEFINED ){
             conflict           = true;
             bypassReady        = false;
@@ -309,40 +309,52 @@ bool sim_ooo::issue() {
 }
 //-------------------------------issue stage end-------------------------------------------------------------//
 //-------------------------------------------------------------execute stage---------------------------------//
+
+void sim_ooo::doExec(execWrLaneT* laneP, bool doWr){
+   //local variable for payloadP in exec unit
+   resStationT* resP             = laneP->payloadP;
+   if( resP->dInstP->stat.state != EXECUTE ){
+      resP->dInstP->stat.state     = EXECUTE;
+      resP->dInstP->stat.t_execute = cycleCount;
+   }
+   bool is_store                 = resP->dInstP->is_store;
+   bool is_load                  = resP->dInstP->is_load;
+
+   if( is_store || is_load )
+      resP->addr                              = agen(resP);
+
+   if( doWr ) {
+      // 1 implies Write Result
+      // It's time to execute!!
+      if( !laneP->outputReady ){
+         laneP->output           = aluGetOutput(resP->dInstP, resP->vj, resP->vk, resP->addr, rob.peekIndex( resP->tagD )->misPred);
+      }
+      // vk has to be updated for all loads
+      else if( is_load )
+         resP->vk                = laneP->output;
+
+      laneP->outputReady         = true;
+   }
+}
+
 bool sim_ooo::execute(){
    bool status = false;
+   //TODO: check it
+   // Check bypass lanes
+   for( int i = 0; i < bypassLane.size(); i++ ){
+      status  = true;
+      doExec( &(bypassLane[i]), true );
+   }
+
    //iterating through execution units
    for(int i = 0; i < EX_TOTAL; i++){
       //iterating through number of instances of an EXEC UNIT
       for(int j = 0; j < execFp[i].numLanes; j++){
          execWrLaneT* laneP = &(execFp[i].lanes[j]);
          //Checking if TTL of the lane is not zero
-         if( laneP->ttl  > 0 ) {
-            //local variable for payloadP in exec unit
-            resStationT* resP             = laneP->payloadP;
-            if( resP->dInstP->stat.state != EXECUTE ){
-               resP->dInstP->stat.state     = EXECUTE;
-               resP->dInstP->stat.t_execute = cycleCount;
-            }
-            bool is_store                 = resP->dInstP->is_store;
-            bool is_load                  = resP->dInstP->is_load;
-
-            if( is_store || is_load )
-               resP->addr                              = agen(resP);
-
-            status          = true;
-            if( laneP->ttl  == 1 ) {
-               // 1 implies Write Result
-               // It's time to execute!!
-               if( !laneP->outputReady ){
-                  laneP->output           = aluGetOutput(resP->dInstP, resP->vj, resP->vk, resP->addr, rob.peekIndex( resP->tagD )->misPred);
-               }
-               // vk has to be updated for all loads
-               else if( resP->dInstP->is_load )
-                  resP->vk                = laneP->output;
-
-               laneP->outputReady         = true;
-            }
+         if( laneP->ttl  > 0 ){
+            status = true;
+            doExec( laneP, laneP->ttl == 1 );
          }
       }
    }
@@ -422,8 +434,68 @@ uint32_t sim_ooo::aluGetOutput(dynInstructT* dInstP, unsigned src1V, unsigned sr
    return aluOut;
 }
 //-----------------------------------WRITE RESULT STAGE MOSTLY---------------------------------------------//
+void sim_ooo::wakeupAndRob(resStationT* resP, uint32_t output, vector<res_station_t>& resGCUnit, vector<int>& resGCIndex){
+   int resDelIndex       = -1;
+   res_station_t resDelUnit;
+   //wake up all res stations by searching for tagD
+   for( int unit = 0; unit < RS_TOTAL; unit++ ){
+      for(uint32_t k = 0; k < resStation[unit].size(); k++) {
+         resStationT* resWakeP   = resStation[unit][k];
+
+         if( resP->tagD == resWakeP->tagD ){
+            resDelIndex          = k;
+            resDelUnit           = (res_station_t)unit;
+         }
+
+         if(resWakeP->qj == resP->tagD) {
+            resWakeP->vj  = output;
+            resWakeP->vjR = true;
+            resWakeP->qj  = UNDEFINED;
+         }
+         if(resWakeP->qk == resP->tagD) {
+            resWakeP->vk  = output;
+            resWakeP->vkR = true;
+            resWakeP->qk  = UNDEFINED;
+            //TODO: check if its needed
+            //if( resWakeP->dInstP->is_store ){
+            //   rob.peekIndex( resWakeP->tagD )->dest = agen(resWakeP);
+            //}
+         }
+      }
+   }
+   // updating ROB
+   rob.peekIndex( resP->tagD )->value = output;
+   rob.peekIndex( resP->tagD )->ready = true;
+
+   //remove entry from res station
+   ASSERT( resDelIndex != -1, "resDelIndex == -1" );
+   resGCUnit.push_back( resDelUnit );
+   resGCIndex.push_back( resDelIndex );
+}
+
 bool sim_ooo::writeResult(vector<res_station_t>& resGCUnit, vector<int>& resGCIndex){
    bool status = false;
+   vector<int> bypassDelIndex;
+
+   for( int i = 0; i < bypassLane.size(); i++ ){
+      resStationT* resP             = bypassLane[i].payloadP;
+      if( resP->dInstP->stat.state == EXECUTE ){
+         status                       = true;
+         resP->dInstP->stat.state     = WRITE_RESULT;
+         resP->dInstP->stat.t_wr      = cycleCount;
+         wakeupAndRob( resP, bypassLane[i].output, resGCUnit, resGCIndex );
+         // Delete this lane now
+         bypassDelIndex.push_back(i);
+      }
+   }
+
+   // Delete
+   int erase = 0;
+   for( int i = 0; i < bypassDelIndex.size(); i++ ){
+      bypassLane.erase( bypassLane.begin() + i - erase  );
+      erase++;
+   }
+
    for(int i = 0; i < EX_TOTAL; i++){
       for(int j = 0; j < execFp[i].numLanes; j++){
          if(execFp[i].lanes[j].ttl > 0){
@@ -438,42 +510,7 @@ bool sim_ooo::writeResult(vector<res_station_t>& resGCUnit, vector<int>& resGCIn
 
                ASSERT( laneP->outputReady, "At WriteResult, output not ready!" );
 
-               int resDelIndex           = -1;
-               res_station_t resDelUnit;
-               //wake up all res stations by searching for tagD
-               for( int unit = 0; unit < RS_TOTAL; unit++ ){
-                  for(uint32_t k = 0; k < resStation[unit].size(); k++) {
-                     resStationT* resWakeP   = resStation[unit][k];
-
-                     if( resP->tagD == resWakeP->tagD ){
-                        resDelIndex          = k;
-                        resDelUnit           = (res_station_t)unit;
-                     }
-
-                     if(resWakeP->qj == resP->tagD) {
-                        resWakeP->vj  = laneP->output;
-                        resWakeP->vjR = true;
-                        resWakeP->qj  = UNDEFINED;
-                     }
-                     if(resWakeP->qk == resP->tagD) {
-                        resWakeP->vk  = laneP->output;
-                        resWakeP->vkR = true;
-                        resWakeP->qk  = UNDEFINED;
-                        //TODO: check if its needed
-                        //if( resWakeP->dInstP->is_store ){
-                        //   rob.peekIndex( resWakeP->tagD )->dest = agen(resWakeP);
-                        //}
-                     }
-                  }
-               }
-               // updating ROB
-               rob.peekIndex( resP->tagD )->value = laneP->output;
-               rob.peekIndex( resP->tagD )->ready = true;
-
-               //remove entry from res station
-               ASSERT( resDelIndex != -1, "resDelIndex == -1" );
-               resGCUnit.push_back( resDelUnit );
-               resGCIndex.push_back( resDelIndex );
+               wakeupAndRob( resP, laneP->output, resGCUnit, resGCIndex );
             }
          }
       }
@@ -490,12 +527,12 @@ bool sim_ooo::commit(int& popCount){
       robT* head       = rob.peekNth(i);
       int headTag      = rob.genIndex(i);
       status           = true;
-      cout << "Commit head " << dec << cycleCount << ": ";
-      head->dInstP->print();
       if(head->ready){
          if(head->dInstP->is_store) {
-            if( execFp[MEMORY].lanes[0].ttl != 0 )
+            if( execFp[MEMORY].lanes[0].ttl != 0 ){
                break;
+            }
+            memBlock                 = true;
          }
 
          if( head->dInstP->stat.state != COMMIT ){
@@ -510,6 +547,7 @@ bool sim_ooo::commit(int& popCount){
                break;
             }
             else{
+               memBlock = false;
                write_memory(head->dest, head->value);
             }
          }
@@ -566,8 +604,6 @@ void sim_ooo::run(unsigned cycles){
       status   |= writeResult(resGCUnit, resGCIndex);
       status   |= execute();
       status   |= issue();
-      //cout << "Cycle: " << dec << cycleCount << endl;
-      //print_reservation_stations();
 
       if( !gSquash ){
          int *delElems = (int*) calloc(RS_TOTAL, sizeof(int));
@@ -945,7 +981,8 @@ void sim_ooo::print_rob(){
             cout << dInstP->dst;
          }
          else if (dInstP->is_store){
-            if(robP->dest == UNDEFINED)
+            // Bad hotfix
+            if(robP->dest == UNDEFINED || dInstP->stat.state < EXECUTE )
                cout << "-";
             else
                cout << setw(8) << dec << robP->dest << setfill(' ');

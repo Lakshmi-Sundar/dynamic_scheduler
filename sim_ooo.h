@@ -292,6 +292,8 @@ class sim_ooo{
    fpFileT        fpFile[NUM_FP_REGISTERS];
    execWrUnitT    execFp[EX_TOTAL];
 
+   vector<execWrLaneT> bypassLane;
+
    unsigned       data_memory_size;
    unsigned char  *data_memory;
 
@@ -305,6 +307,7 @@ class sim_ooo{
    unsigned       robSize;
    int            issueWidth;
    bool           gSquash;
+   bool           memBlock;
    vector <instStatT> log;
 
    //----------------------------------------------------------------------------//
@@ -406,6 +409,8 @@ class sim_ooo{
    bool execute();
    uint32_t aluGetOutput(dynInstructT* dInstP, unsigned src1V, unsigned src2V, uint32_t addr, bool& misPred);
    bool writeResult(vector<res_station_t>& resGCUnit, vector<int>& resGCIndex);
+   void wakeupAndRob(resStationT* resP, uint32_t output, vector<res_station_t>& resGCUnit, vector<int>& resGCIndex);
+   void doExec(execWrLaneT* laneP, bool doWr);
    bool commit(int& popCount);
    void squash();
    bool regBusy(uint32_t regNo, bool isF) ;

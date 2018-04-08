@@ -727,7 +727,7 @@ Entry  Busy  Ready          PC     State  Dest       Value
     0   yes    yes  0x00000018        WR    R1  0x0000a008
     1   yes     no  0x0000001c     ISSUE     -           -
     2    no     no           -         -     -           -
-    3   yes     no  0x0000000c       EXE    F40932           -
+    3   yes     no  0x0000000c       EXE 40964           -
     4   yes     no  0x00000010     ISSUE    F4           -
     5   yes     no  0x00000014     ISSUE    F1           -
 
@@ -768,7 +768,7 @@ Entry  Busy  Ready          PC     State  Dest       Value
     0   yes    yes  0x00000018        WR    R1  0x0000a008
     1   yes     no  0x0000001c     ISSUE     -           -
     2    no     no           -         -     -           -
-    3   yes    yes  0x0000000c        WR    F40932  0x40800000
+    3   yes    yes  0x0000000c        WR 40964  0x40800000
     4   yes     no  0x00000010     ISSUE    F4           -
     5   yes     no  0x00000014     ISSUE    F1           -
 
@@ -809,7 +809,7 @@ Entry  Busy  Ready          PC     State  Dest       Value
     0   yes    yes  0x00000018        WR    R1  0x0000a008
     1   yes     no  0x0000001c     ISSUE     -           -
     2   yes     no  0x00000020     ISSUE    F2           -
-    3   yes    yes  0x0000000c    COMMIT    F40932  0x40800000
+    3   yes    yes  0x0000000c    COMMIT 40964  0x40800000
     4   yes     no  0x00000010       EXE    F4           -
     5   yes     no  0x00000014     ISSUE    F1           -
 

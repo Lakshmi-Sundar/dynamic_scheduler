@@ -201,7 +201,7 @@ bool sim_ooo::fetch(){
 // The following function is for IS
 bool sim_ooo::dispatch(){
    bool status = false;
-   //cout << "CycleCount: " << cycleCount << endl;
+   cout << "CycleCount: " << dec << cycleCount << endl;
    //To iterate through reservation station units
    for(int unit = 0; unit < RS_TOTAL; unit++) {
       //To iterate through individual units
@@ -217,18 +217,25 @@ bool sim_ooo::dispatch(){
          bool is_load          = resP->dInstP->is_load;
          uint32_t addr         = agen(resP);
          
+         cout << "Testing: ";
+         resP->dInstP->print();
          if( is_load ){
             instReady      = !isConflictingStore(resP->tagD, addr, bypassReady, bypassValue);
          } 
 
-         //resP->dInstP->print();
-         //cout << hex << resP->dInstP->pc << " :: " << !resP->inExec << resP->vjR << resP->vkR << instReady << endl;
-         //cout << bypassReady << endl;
+         cout << hex << resP->dInstP->pc << " :: " << !resP->inExec << resP->vjR << resP->vkR << instReady << endl;
+         cout << bypassReady << endl;
+
+         // Record address as soon as we can for disambiguation
+         if( is_store && resP->vkR ){
+            rob.peekIndex( resP->tagD )->dest       = addr;
+         }
+
          if ( !resP->inExec && resP->vjR && resP->vkR && instReady ){
             int execUnit   = opcodeToExUnit(resP->dInstP->opcode);
             int numLanes   = execFp[execUnit].numLanes;
             bool isMemUnit = execUnit == MEMORY;
-
+                  
             for(int laneId = 0; laneId < numLanes; laneId++){
                //checking for free execution units
                bool laneCond = ((laneId < (numLanes - 1)) && !bypassReady && !is_store) ||
@@ -249,13 +256,6 @@ bool sim_ooo::dispatch(){
                   // Setting up outputs
                   execFp[execUnit].lanes[laneId].outputReady = is_load && bypassReady;
                   execFp[execUnit].lanes[laneId].output      = (is_load && bypassReady) ? bypassValue : UNDEFINED;
-                  if( is_store ){
-                     //cout << resP->dInstP->is_store << resP->dInstP->is_load << ", " << resP->dInstP->imm << ", " << (int) resP->vj << ", " << (int) resP->vk << endl;
-                     //cout << resP->dInstP->src1 << ", " << resP->dInstP->src2 << endl;
-                     //resP->dInstP->print();
-                     rob.peekIndex( resP->tagD )->dest       = addr;
-                     //cout << "Addr: " << hex << addr << endl;
-                  }
                   break;
                }
             }
@@ -266,9 +266,10 @@ bool sim_ooo::dispatch(){
 }
 
 //checking for conflicting store with a load instruction
-bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassReady, uint32_t& bypassValue ){
+bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassReady, uint32_t& bypassValue){
    bool conflict               = false;
    bypassReady                 = false;
+   cout << "Conflict check: " << memAddress << endl;
    for(int i = 0; i < rob.getCount(); i++){
       //getting the current tag
       int tag                  = rob.genIndex(i);
@@ -278,6 +279,8 @@ bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassR
       //checking if the opcode is store
       if( robEntryP->dInstP->is_store ){
          //if the store is not complete (a.k.a ??), then there is a conflict
+         cout << "Inspect: " << robEntryP->dest << ", " << robEntryP->ready << endl;
+         robEntryP->dInstP->print();
          if( robEntryP->dest == UNDEFINED ){
             conflict           = true;
             bypassReady        = false;
@@ -285,8 +288,8 @@ bool sim_ooo::isConflictingStore(int loadTag, unsigned memAddress, bool& bypassR
          //if store is complete and match the address, no conflict.
          //values are stored from this store to load temporarily
          else if(robEntryP->dest == memAddress){
-            conflict           = false;
-            bypassReady        = true;
+            conflict           = !robEntryP->ready; // TODO: not conflicting if rob is ready
+            bypassReady        = robEntryP->ready;  // bypass is ready if rob is ready
             bypassValue        = robEntryP->value;
          }
       }
@@ -440,20 +443,26 @@ bool sim_ooo::writeResult(vector<res_station_t>& resGCUnit, vector<int>& resGCIn
                //wake up all res stations by searching for tagD
                for( int unit = 0; unit < RS_TOTAL; unit++ ){
                   for(uint32_t k = 0; k < resStation[unit].size(); k++) {
-                     if( resP->tagD == resStation[unit][k]->tagD ){
-                        resDelIndex      = k;
-                        resDelUnit       = (res_station_t)unit;
+                     resStationT* resWakeP   = resStation[unit][k];
+
+                     if( resP->tagD == resWakeP->tagD ){
+                        resDelIndex          = k;
+                        resDelUnit           = (res_station_t)unit;
                      }
 
-                     if(resStation[unit][k]->qj == resP->tagD) {
-                        resStation[unit][k]->vj  = laneP->output;
-                        resStation[unit][k]->vjR = true;
-                        resStation[unit][k]->qj  = UNDEFINED;
+                     if(resWakeP->qj == resP->tagD) {
+                        resWakeP->vj  = laneP->output;
+                        resWakeP->vjR = true;
+                        resWakeP->qj  = UNDEFINED;
                      }
-                     if(resStation[unit][k]->qk == resP->tagD) {
-                        resStation[unit][k]->vk  = laneP->output;
-                        resStation[unit][k]->vkR = true;
-                        resStation[unit][k]->qk  = UNDEFINED;
+                     if(resWakeP->qk == resP->tagD) {
+                        resWakeP->vk  = laneP->output;
+                        resWakeP->vkR = true;
+                        resWakeP->qk  = UNDEFINED;
+                        //TODO: check if its needed
+                        //if( resWakeP->dInstP->is_store ){
+                        //   rob.peekIndex( resWakeP->tagD )->dest = agen(resWakeP);
+                        //}
                      }
                   }
                }
@@ -481,6 +490,8 @@ bool sim_ooo::commit(int& popCount){
       robT* head       = rob.peekNth(i);
       int headTag      = rob.genIndex(i);
       status           = true;
+      cout << "Commit head " << dec << cycleCount << ": ";
+      head->dInstP->print();
       if(head->ready){
          if(head->dInstP->is_store) {
             if( execFp[MEMORY].lanes[0].ttl != 0 )
@@ -523,13 +534,14 @@ bool sim_ooo::commit(int& popCount){
             }
          }
 
-         // Commit
-         popCount++;
 
          //--------------- BRANCH --------------
          if(gSquash){
             break;
          }
+
+         // Commit
+         popCount++;
       }
       else{
          // Instruction at pseudo-head is not ready
@@ -547,15 +559,24 @@ void sim_ooo::run(unsigned cycles){
    while((rtc && status) || cycles) {
       // For feedback FF
       int popCount;
-
-      status       = commit(popCount);
       vector<res_station_t> resGCUnit;
       vector<int>           resGCIndex;
+
+      status    = commit(popCount);
       status   |= writeResult(resGCUnit, resGCIndex);
       status   |= execute();
       status   |= issue();
+      //cout << "Cycle: " << dec << cycleCount << endl;
+      //print_reservation_stations();
 
       if( !gSquash ){
+         int *delElems = (int*) calloc(RS_TOTAL, sizeof(int));
+         for( unsigned i = 0; i < resGCUnit.size(); i++ ){
+            res_station_t unit = resGCUnit[i];
+            resStation[unit].erase( resStation[unit].begin() + resGCIndex[i] - delElems[unit] );
+            delElems[unit]++;
+         }
+
          for( int i = 0; i < popCount; i++ ){
             bool underflow;
             robT robEntry  = rob.pop(underflow);
@@ -569,16 +590,10 @@ void sim_ooo::run(unsigned cycles){
             ASSERT(!underflow, "ROB underflown");
          }
 
-         int delElems = 0;
-         for( unsigned i = 0; i < resGCUnit.size(); i++ ){
-            res_station_t unit = resGCUnit[i];
-            resStation[unit].erase( resStation[unit].begin() + resGCIndex[i] - delElems );
-            delElems++;
-         }
       }
       else{
          squash(); 
-         status    = true;
+         status   = true;
       }
 
       cycles = cycles > 0 ? cycles - 1 : 0;
@@ -933,7 +948,7 @@ void sim_ooo::print_rob(){
             if(robP->dest == UNDEFINED)
                cout << "-";
             else
-               cout << setw(5) << setfill(' ') << "0x" << setw(8) << setfill('0') << hex << robP->dest << setfill(' ');
+               cout << setw(8) << dec << robP->dest << setfill(' ');
          }
          else
             cout << "-";
